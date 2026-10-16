@@ -9,7 +9,7 @@ Thank you for helping with the project. These rules keep five people working on 
 3. Commit small, focused changes with a clear message (see below).
 4. Run the tests before you push: `python -m pytest -q`. All tests must pass.
 5. Push your branch and open a pull request into `main`. Fill in the template.
-6. One other team member reviews it. Merge after the review and a green CI run.
+6. One other team member reviews it. Merge after the approval. The test workflow also runs on each pull request; it is a guide, not a merge requirement.
 
 Do not push directly to `main`.
 
