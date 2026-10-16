@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Run outputs and local caches (share real flight data through the group drive)
+data/
+cache/
+
+# ROS2 build products
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

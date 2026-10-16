@@ -1,0 +1,11 @@
+uint32 seq
+float64 t_send
+uint16 station_id
+float32 x
+float32 y
+float32 z
+float32 vx
+float32 vy
+float32 vz
+float32 heading_deg
+uint8 mission_type

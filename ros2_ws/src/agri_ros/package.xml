@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>agri_ros</name>
+  <version>0.1.0</version>
+  <description>ROS2 nodes wrapping the agri_loop gateway and panel simulator</description>
+  <maintainer email="112279457+Ananth-02@users.noreply.github.com">DEIS Group 3</maintainer>
+  <license>MIT</license>
+  <depend>rclpy</depend>
+  <depend>agri_msgs</depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

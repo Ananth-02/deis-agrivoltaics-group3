@@ -1,0 +1,18 @@
+# Working set as of 2026-10-16 (Python 3.9 venv, 22 tests pass).
+numpy==2.0.2
+opencv-contrib-python-headless==5.0.0.93
+scipy
+matplotlib
+pyserial
+pytest
+# cflib's own dependencies, listed here because cflib is installed without them (see below)
+pyusb
+libusb-package
+packaging
+
+# cflib is NOT listed: cflib 0.1.27 declares numpy~=1.20, so a plain "pip install cflib" would downgrade
+# numpy to 1.26 and replace the set above. Install it after this file, without dependencies:
+#   pip install cflib==0.1.27 --no-deps
+#
+# Install only ONE OpenCV wheel (opencv-contrib-python-headless above). Having opencv-python-headless as
+# well makes both write the same cv2 package, and uninstalling either one breaks import cv2.

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agri_loop"
+version = "0.1.0"
+description = "DEIS Group 3: drone to solar panel loop (C1 drone, C4 message layer, C5 vision)"
+requires-python = ">=3.9"
+# cflib is deliberately not listed: install it with `pip install cflib==0.1.27 --no-deps` (see requirements.txt)
+dependencies = ["numpy", "opencv-contrib-python-headless", "pyserial", "matplotlib", "scipy", "pyusb", "libusb-package"]
+
+[tool.setuptools.packages.find]
+include = ["agri_loop*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
