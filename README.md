@@ -6,7 +6,7 @@ This repository holds the shared code for the TG2 component checks:
 
 | Check | Component | Package | Status (16 Oct 2026) |
 | --- | --- | --- | --- |
-| C1 | Drone: Crazyflie 2.1 Brushless, Flow deck v2, AI deck 1.1 | `agri_loop/drone` | Built; tested on the simulator only |
+| C1 | Drone: Crazyflie 2.1 Brushless, Lighthouse deck (lab base stations), AI deck 1.1 | `agri_loop/drone` | Built; tested on the simulator only |
 | C4 | Message layer: CAM-like beacons, DENM-like events, over UDP | `agri_loop/link` | Built; tested in simulation and on local UDP |
 | C5 | Offline vision: mosaic, panel mask, hidden-patch detection | `agri_loop/vision` | Built; tested on synthetic data |
 | ROS2 | `agri_msgs` and `agri_ros` wrappers | `ros2_ws/src` | Written, not yet run |
@@ -28,7 +28,7 @@ python -m venv .venv
 
 - On Linux or macOS use `.venv/bin/python` instead of `.venv/Scripts/python`.
 - cflib is installed without its dependencies on purpose: cflib 0.1.27 declares numpy 1.x and would otherwise downgrade numpy 2.0.2. See the comments in `requirements.txt`.
-- Expected result: 22 tests pass (drone 8, link 8, UDP 2, vision 4).
+- Expected result: 30 tests pass (drone 16, link 8, UDP 2, vision 4).
 - To fly the real drone on Windows, the Crazyradio also needs the libusb driver (Zadig); see the build guide.
 
 ## Main commands

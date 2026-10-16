@@ -11,7 +11,11 @@ import threading
 from typing import Any, Dict, List, Optional
 
 COLS = ["t", "t_cf_ms", "x", "y", "z", "vx", "vy", "vz", "roll", "pitch", "yaw",
-        "vbat", "battery_level", "pm_state", "sup_info", "zrange_mm"]
+        "vbat", "battery_level", "pm_state", "sup_info", "zrange_mm", "lh_status", "lh_active"]
+
+# lighthouse.status: 0 no base station received, 1 received but geometry or calibration missing,
+# 2 base station data goes to the state estimator
+LH_TO_ESTIMATOR = 2
 
 # pm.state values in the Crazyflie firmware
 PM_BATTERY, PM_CHARGING, PM_CHARGED, PM_LOW_POWER, PM_SHUTDOWN = 0, 1, 2, 3, 4

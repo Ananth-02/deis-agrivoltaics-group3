@@ -17,12 +17,14 @@ from .flightlog import FlightLogger
 FAST_VARS = ["stateEstimate.x", "stateEstimate.y", "stateEstimate.z",
              "stateEstimate.vx", "stateEstimate.vy", "stateEstimate.vz"]
 SLOW_VARS = ["stabilizer.roll", "stabilizer.pitch", "stabilizer.yaw", "pm.vbat",
-             "pm.batteryLevel", "pm.state", "supervisor.info", "range.zrange"]
+             "pm.batteryLevel", "pm.state", "supervisor.info", "range.zrange",
+             "lighthouse.status", "lighthouse.bsActive"]
 _KEY = {"stateEstimate.x": "x", "stateEstimate.y": "y", "stateEstimate.z": "z",
         "stateEstimate.vx": "vx", "stateEstimate.vy": "vy", "stateEstimate.vz": "vz",
         "stabilizer.roll": "roll", "stabilizer.pitch": "pitch", "stabilizer.yaw": "yaw",
         "pm.vbat": "vbat", "pm.batteryLevel": "battery_level", "pm.state": "pm_state",
-        "supervisor.info": "sup_info", "range.zrange": "zrange_mm"}
+        "supervisor.info": "sup_info", "range.zrange": "zrange_mm",
+        "lighthouse.status": "lh_status", "lighthouse.bsActive": "lh_active"}
 
 PLATFORM_PORT = 0x0D
 PLATFORM_COMMAND = 0

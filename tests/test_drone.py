@@ -127,3 +127,40 @@ def test_beacon_reaches_udp_gateway(tmp_path):
     assert got[0].x == pytest.approx(1.5) and got[0].y == pytest.approx(2.1)
     assert got[0].mission_type == MISSION_CROP_OCCLUSION
     assert EventLog.load(str(tmp_path / "drone.jsonl"))[0]["msg"] == "DroneBeacon"
+
+
+class _FakeCF:
+    def __init__(self, decks, **state):
+        self._decks, self._s, self.missing_vars = decks, state, []
+
+    def decks(self):
+        return self._decks
+
+    def latest(self):
+        return self._s
+
+
+_GROUND = dict(x=0.0, y=0.0, z=0.0, roll=0.0, pitch=0.0, yaw=0.0, vbat=4.1, sup_info=1)
+
+
+@pytest.mark.parametrize("decks,extra,ok,source,text", [
+    ({"bcFlow2": True, "bcAI": True}, {}, True, "flow", ""),
+    ({"bcLighthouse4": True, "bcAI": True}, {"lh_status": 2, "lh_active": 0b11}, True, "lighthouse", ""),
+    ({"bcLighthouse4": True, "bcAI": True}, {"lh_status": 1, "lh_active": 0}, False, "none", "geometry"),
+    ({"bcLighthouse4": True, "bcAI": True}, {"lh_status": 0, "lh_active": 0}, False, "none", "no base stations"),
+    ({"bcLighthouse4": True, "bcAI": True}, {"lh_status": 2, "lh_active": 0b1}, False, "none", "at least 2"),
+    ({"bcLighthouse4": True, "bcFlow2": True, "bcAI": True}, {"lh_status": 0}, True, "flow", ""),
+    ({"bcAI": True}, {}, False, "none", "no positioning"),
+])
+def test_preflight_positioning(decks, extra, ok, source, text):
+    from agri_loop.drone.c1_common import preflight
+    passed, report, problems = preflight(_FakeCF(decks, **dict(_GROUND, **extra)), C1Config(), need_camera=True)
+    assert passed is ok and report["positioning"] == source
+    assert text in " ".join(problems)
+
+
+def test_preflight_warns_when_not_facing_lighthouse_x():
+    from agri_loop.drone.c1_common import preflight
+    s = dict(_GROUND, yaw=40.0, lh_status=2, lh_active=0b11)
+    passed, report, _ = preflight(_FakeCF({"bcLighthouse4": True, "bcAI": True}, **s), C1Config(), need_camera=True)
+    assert passed and any("Lighthouse x axis" in w for w in report["warnings"])

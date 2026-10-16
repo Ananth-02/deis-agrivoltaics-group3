@@ -7,7 +7,7 @@ import time
 from typing import Any, Dict, List, Tuple
 
 from .cpx_stream import FrameRecorder
-from .flightlog import SUP_CAN_BE_ARMED
+from .flightlog import LH_TO_ESTIMATOR, SUP_CAN_BE_ARMED
 from .mission import C1Config
 
 # Our lab drone uses address E7E7E7E7E2 (the factory default is E7E7E7E7E7).
@@ -34,14 +34,21 @@ def preflight(vehicle: Any, cfg: C1Config, need_camera: bool) -> Tuple[bool, Dic
     problems: List[str] = []
     warnings: List[str] = []
     decks = vehicle.decks()
-    if not decks.get("bcFlow2"):
-        problems.append("Flow deck v2 not detected (deck.bcFlow2): the drone cannot hold position or height")
+    s = vehicle.latest()
+    positioning = positioning_source(decks, s)
+    if positioning == "none":
+        if decks.get("bcLighthouse4"):
+            problems.append(lighthouse_problem(s))
+        else:
+            problems.append("no positioning: fit a Flow deck v2 or a Lighthouse deck with base stations")
+    elif positioning == "lighthouse" and abs(s.get("yaw", 0.0) or 0.0) > 15:
+        warnings.append(f"heading {s.get('yaw', 0.0):.0f} deg: face the drone along the Lighthouse x axis, "
+                        "or it turns to 0 deg on take-off")
     if not decks.get("bcAI"):
         (problems if need_camera else warnings).append("AI deck not detected (deck.bcAI)")
     missing = [v for v in getattr(vehicle, "missing_vars", []) if v in REQUIRED_VARS]
     if missing:
         problems.append("log variables missing from the firmware: " + ", ".join(missing))
-    s = vehicle.latest()
     if not s:
         problems.append("no log data received from the drone")
     vb = s.get("vbat")
@@ -56,10 +63,36 @@ def preflight(vehicle: Any, cfg: C1Config, need_camera: bool) -> Tuple[bool, Dic
     sup = s.get("sup_info")
     if sup is not None and not (int(sup) & SUP_CAN_BE_ARMED):
         problems.append("supervisor says the system cannot be armed (check for a tumble or a locked state; restart)")
-    report = dict(decks=decks, state={k: s.get(k) for k in ("x", "y", "z", "roll", "pitch", "yaw", "vbat",
-                                                            "battery_level", "pm_state", "sup_info")},
+    report = dict(decks=decks, positioning=positioning, state={k: s.get(k) for k in ("x", "y", "z", "roll", "pitch", "yaw", "vbat",
+                                                            "battery_level", "pm_state", "sup_info",
+                                                            "lh_status", "lh_active")},
                   missing_vars=getattr(vehicle, "missing_vars", []), warnings=warnings, problems=problems)
     return not problems, report, problems
+
+
+def active_base_stations(s: Dict[str, Any]) -> int:
+    return bin(int(s.get("lh_active") or 0)).count("1")
+
+
+def positioning_source(decks: Dict[str, bool], s: Dict[str, Any]) -> str:
+    """'lighthouse' when at least two base stations feed the estimator, else 'flow' with a Flow deck, else 'none'."""
+    if decks.get("bcLighthouse4") and s.get("lh_status") == LH_TO_ESTIMATOR and active_base_stations(s) >= 2:
+        return "lighthouse"
+    if decks.get("bcFlow2"):
+        return "flow"
+    return "none"
+
+
+def lighthouse_problem(s: Dict[str, Any]) -> str:
+    status = s.get("lh_status")
+    if status is None:
+        return "Lighthouse status not logged: update the firmware"
+    if status == 0:
+        return "Lighthouse deck sees no base stations: check they are on and in view of the deck"
+    if status == 1:
+        return "Lighthouse sees base stations but has no geometry: run the geometry estimation in cfclient"
+    return (f"Lighthouse uses {active_base_stations(s)} base station(s); at least 2 are needed: "
+            "move the drone into view of more base stations")
 
 
 def stream_check(recorder: FrameRecorder, seconds: float) -> Dict[str, Any]:

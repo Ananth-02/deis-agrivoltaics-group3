@@ -8,7 +8,7 @@ TG2 (Wed 21 Oct 2026) checks each component on its own before the loop is closed
 
 | Check | Component | What it proves | Pass criterion (TG1 plan) | Code |
 | --- | --- | --- | --- | --- |
-| C1 | Drone: Crazyflie 2.1 Brushless, Flow deck v2, AI deck 1.1 | The drone flies repeatable straight passes and records images, pose and battery | 10 scripted straight passes at constant speed; frames saved at 20 fps or more (threshold to confirm); no crashes; battery log | `agri_loop/drone`, `python -m agri_loop.drone.c1_*` |
+| C1 | Drone: Crazyflie 2.1 Brushless, Lighthouse deck with base stations, AI deck 1.1 | The drone flies repeatable straight passes and records images, pose and battery | 10 scripted straight passes at constant speed; frames saved at 20 fps or more (threshold to confirm); no crashes; battery log | `agri_loop/drone`, `python -m agri_loop.drone.c1_*` |
 | C4 | Message layer (CAM-like beacons, DENM-like events) | Drone pose and panel events reach the other side on time | 10 minutes at 10 Hz; packet delivery ratio (PDR) and latency histogram; the same under emulated loss | `agri_loop/link`, `python -m agri_loop.link.c4_*` |
 | C5 | Vision, offline | The image pipeline works on recorded flight frames | Mosaic, panel mask, crop index and red-patch detection on recorded video, with and without the panel in view | `agri_loop/vision`, `python -m agri_loop.vision.c5_run` |
 
@@ -28,7 +28,9 @@ One drone stack, one laptop and one scene serve all three checks. Check every ro
 | Item | Role | Key facts | Check on our unit |
 | --- | --- | --- | --- |
 | [Crazyflie 2.1 Brushless](https://www.bitcraze.io/products/crazyflie-2-1-brushless/) | Flying platform | 34 g take-off weight with legs; about 10 min flight on the stock 350 mAh LiPo; 40 g recommended payload; must be armed before the motors spin | Firmware up to date; propellers on the right motors (CW marked 55-35R, CCW 55-35); guards fitted |
-| [Flow deck v2](https://www.bitcraze.io/products/flow-deck-v2/) | Height and velocity, so the drone can hold a line | VL53L1x range sensor up to 4 m, PMW3901 optical flow sensor, 1.6 g, mounted underneath, works best on matt surfaces | `deck.bcFlow2 = 1` in the pre-flight report |
+| [Lighthouse deck](https://www.bitcraze.io/documentation/tutorials/getting-started-with-lighthouse/) | Absolute position and height, so the drone can hold a line | Four light sensors and an FPGA; mounted on top, "FRONT UP"; needs the lab's Lighthouse base stations | `deck.bcLighthouse4 = 1`; Lighthouse status 2 with 2 or more base stations in the pre-flight report |
+| Lighthouse base stations (in the lab) | Sweep the room with infrared light that the deck times | 2 to 4 V2 (or 2 V1) cover about 4 x 4 x 2 m; mounted above the flight area | Powered, unique channels, geometry estimated (see Lighthouse set-up) |
+| [Flow deck v2](https://www.bitcraze.io/products/flow-deck-v2/) (backup, not fitted) | Height and velocity from the floor | Ours fails its self-test (both sensors silent, 16 Oct), so it is removed; a failing deck stops the drone from arming | Refit only if repaired: `deck.bcFlow2 = 1` and no five-blink LED |
 | [AI deck 1.1](https://www.bitcraze.io/documentation/tutorials/getting-started-with-aideck/) | Camera and Wi-Fi image stream | GAP8 processor, ESP32 Wi-Fi, HM01B0 **monochrome** camera; 324x244 (QVGA build) or 324x324 (native build) | `deck.bcAI = 1`; which way the camera looks; frame rate over Wi-Fi |
 | Crazyradio 2.0 or PA | Commands and logs between laptop and drone | Our drone: `radio://0/80/2M/E7E7E7E7E2` (factory default ends in E7); the C1 tools use it unless `--uri` or `AGRI_CF_URI` says otherwise | Set the cfclient Address box to `0xE7E7E7E7E2` before Scan |
 | Laptop (Windows) | Runs `agri_loop`, records the stream, scores the runs | Must join the AI deck Wi-Fi "WiFi streaming example" while the radio is plugged in | Wi-Fi and radio work at the same time |
@@ -39,17 +41,19 @@ One drone stack, one laptop and one scene serve all three checks. Check every ro
 
 Deck stack, bottom to top:
 
-1. Flow deck v2 at the very bottom, sensor facing the floor, nothing blocking it.
-2. Crazyflie 2.1 Brushless main board.
-3. AI deck on top, on the long header pins that come with it, holding the battery.
+1. Lighthouse deck on top, "FRONT UP" arrow forward, its four sensors uncovered; it holds the battery in.
+2. Battery with the foam pad.
+3. Crazyflie 2.1 Brushless main board.
+4. AI deck underneath on the long pins and the wide spacer, the green holder turning the camera to look down.
+5. Flow deck v2: not fitted (see the table). If a working one is added, it goes at the very bottom.
 
 - Mount each deck facing the drone's front, which is the antenna bump side (the blue LEDs are at the back). Bitcraze notes that this orientation matters for decks.
 - The ESP32 antenna on the AI deck breaks easily in a crash. Bitcraze suggests a dab of hot glue on it.
-- Bitcraze sells an "AI bundle" for the Brushless and its deck matrix marks Flow deck v2 and AI deck as compatible with each other, so this stack is supported.
+- Bitcraze's deck matrix marks Lighthouse and AI deck as compatible, with one note: the AI deck's GAP8 uses UART1, so a firmware build that enables UART1 conflicts. The standard image streamer does not use it.
 
 ## Software set-up
 
-Every command in this guide runs from the repository root with the project's own Python 3.9 environment (`.venv`). On Linux or macOS replace `.venv\Scripts\python` with `.venv/bin/python`. Do steps 1 to 6 once per laptop; step 6 should end with 22 tests passing.
+Every command in this guide runs from the repository root with the project's own Python 3.9 environment (`.venv`). On Linux or macOS replace `.venv\Scripts\python` with `.venv/bin/python`. Do steps 1 to 6 once per laptop; step 6 should end with 30 tests passing.
 
 1. Install the Crazyflie client (cfclient) in its own environment, not in `.venv`.
     - Bitcraze warns that `opencv-python` conflicts with cfclient, and `.venv` has OpenCV.
@@ -68,7 +72,7 @@ Every command in this guide runs from the repository root with the project's own
     - `python -m venv .venv`, then `.venv\Scripts\python -m pip install -r requirements.txt`.
     - Then `.venv\Scripts\python -m pip install cflib==0.1.27 --no-deps`. cflib 0.1.27 is the newest release for Python 3.9 and asks for numpy 1.x; a plain install would downgrade numpy from 2.0.2 to 1.26.4, so it is installed without dependencies.
     - With numpy 2.0.2, 57 of 60 cflib modules import; the 3 that do not need optional extras we do not use (`yaml` for Lighthouse and LPS files, and a native link driver). `pip check` reports the numpy and packaging version mismatch; that is expected.
-6. Run the test suite: `.venv\Scripts\python -m pytest -q`. Expected: 22 passed (drone 8, link 8, UDP 2, vision 4).
+6. Run the test suite: `.venv\Scripts\python -m pytest -q`. Expected: 30 passed (drone 16, link 8, UDP 2, vision 4).
 
 Repository layout:
 
@@ -83,6 +87,23 @@ Repository layout:
 
 - Shared formats: all logs are JSON lines through one `EventLog` class, all times are laptop epoch seconds, and C1 frames are written exactly as C5 reads them (PNG files plus `index.csv` with columns `idx,t,file`).
 
+## Lighthouse set-up (positioning)
+
+The drone flies on the lab's Lighthouse base stations. Set them up once per room layout ([Bitcraze Lighthouse guide](https://www.bitcraze.io/documentation/tutorials/getting-started-with-lighthouse/)).
+
+1. Mount 2 to 4 base stations at least 0.5 m above the flight area, angled down, with a clear view of the whole pass line. Remove mirrors and shiny objects; avoid direct sunlight.
+2. Give each base station a unique channel. V2: cfclient, View, Tabs, Lighthouse Positioning, "Set BS Channel" (channels 1 to 4). V1: modes b and c without a sync cable.
+3. Connect cfclient to the drone, click "Switch BS version" and pick the version. Leave the drone in view of all base stations for about 20 s to receive calibration data.
+4. Click "Start set up" and take the samples:
+    - Origin: the drone on the take-off cross. This becomes (0, 0, 0).
+    - X axis: the drone 1 m along the pass line. This makes the pass line the x axis, which the C1 passes follow.
+    - XY plane: a few points on the floor off the line.
+    - XYZ space: hold the drone at a few heights along the line, turning it slowly until each sample is confirmed.
+5. Check: the deck's LED turns green, the 3D view shows each base station and the drone as a blue dot, and moving the drone by hand moves the dot without jumps. Sample errors above 10 mm mean a sample should be deleted or more samples added.
+6. The geometry is stored on the drone. Redo it only if a base station moves.
+
+People, the panel and the lamp stand must not block the base stations' view of the drone during a pass.
+
 ## C1 Drone: physical set-up
 
 C1 needs a 1.5 m straight line over a matt, textured floor, a drone that starts on the same mark facing the same way every time, and a camera that looks at the floor. Set it up in this order.
@@ -91,11 +112,9 @@ C1 needs a 1.5 m straight line over a matt, textured floor, a drone that starts 
     - Tape a take-off cross. Tape the pass line from it, 1.5 m long, with a mark every 0.25 m.
     - The drone flies out along the line and back, so the room needs the line plus 0.5 m at each end (the software geofence) plus a margin.
     - Tape a keep-out zone at least 1 m around the line.
-2. Cover the line with a matt, textured surface (artificial turf or a printed mat).
-    - The Flow deck measures motion from floor texture. A plain or shiny floor makes the drone drift.
-    - Use the same surface as the crop bed for Exp 1.1, so C1 also tests the real scene.
+2. Cover the line with the crop-bed surface (artificial turf or a printed mat). Lighthouse does not need floor texture, but the camera does: C5 stitches frames by their features, so a plain floor will not stitch.
 3. Light the area evenly and keep the lamp in one fixed position. Mark the lamp stand on the floor.
-4. Assemble the drone as in Shared hardware: Flow deck underneath, AI deck on top, guards on, propellers checked.
+4. Assemble the drone as in Shared hardware: Lighthouse deck on top, AI deck underneath, guards on, propellers checked.
 5. Check which way the camera looks. This decides whether C5 works.
     - With the AI deck on top, the camera on its front edge looks forward, not down. Confirm it on our unit in C1 software step 2.
     - C5 maps frames with a similarity transform and assumes a downward view, so a forward view will not stitch.
@@ -105,13 +124,13 @@ C1 needs a 1.5 m straight line over a matt, textured floor, a drone that starts 
 6. Charge the batteries. A pack should read 4.1 V or more at rest. The software refuses to take off below 3.8 V.
 7. Place the drone on the take-off cross, front (antenna bump) pointing along the pass line, then switch it on.
     - Keep it still and level until calibration ends: LED 1 blinking red twice a second means ready.
-    - The Flow deck sets its origin and its x axis at power-up. After every battery swap, put the drone back on the cross facing the same way before switching on, or the passes move.
+    - Lighthouse gives absolute position, so the passes always run along the x axis set in the Lighthouse set-up, wherever the drone starts. Start on the cross facing along the line: the drone holds heading 0, and the pre-flight warns if it faces more than 15 deg off.
 8. Connect the laptop: Crazyradio in a USB port, laptop Wi-Fi joined to "WiFi streaming example". The laptop loses internet access while joined; that is expected.
 9. Agree the roles: one person at the laptop (Ctrl+C lands the drone), one safety person at the edge of the keep-out zone, nobody inside it.
 10. Keep the default height of 0.6 m over the soft mat.
     - If the radio link drops, the laptop can no longer command a landing, and the firmware stops the motors on its own after a short timeout. A low height over a soft surface limits the damage.
 
-The C2 overhead camera is the independent check of these passes (the Flow deck estimate drifts). If C2 is ready, film every C1 run from above and keep the video with the run folder.
+The C2 overhead camera is the independent check of these passes (the logged pose is the drone's own estimate). If C2 is ready, film every C1 run from above and keep the video with the run folder.
 
 ## C1 Drone: software
 
@@ -123,7 +142,7 @@ Three commands cover C1: `c1_preflight` (motors off), `c1_run` (flies and record
 
 2. Pre-flight with the motors off:
     - `.venv\Scripts\python -m agri_loop.drone.c1_preflight --stream 10`
-    - Checks: Flow deck present (`deck.bcFlow2`), AI deck present (`deck.bcAI`), position, velocity and battery log variables exist in the firmware, battery 3.8 V or more, drone level, supervisor allows arming.
+    - Checks: positioning (Lighthouse status 2 with at least 2 base stations, or a working Flow deck), AI deck present (`deck.bcAI`), position, velocity and battery log variables exist in the firmware, battery 3.8 V or more, drone level, supervisor allows arming.
     - Then it records 10 s from the AI deck and prints frame size, raw or JPEG, and frames per second. Frame size is always read from the stream header (324x244 or 324x324), never assumed.
     - Open the first PNG in `data\c1\<date_time>_preflight\frames`. Hold a printed arrow under the camera to see the view direction and pick `--flip` for the mirror.
 
@@ -155,7 +174,7 @@ What one run folder (`data\c1\<date_time>_<label>`) contains:
 
 - `config.json`: command-line arguments and mission settings.
 - `events.jsonl`: pre-flight report, stream check, armed, take-off, every pass start and end, land, any abort.
-- `flight_log.csv`: 20 rows a second with x, y, z, vx, vy, vz (Flow deck estimate), roll, pitch, yaw, battery voltage and level, power state, supervisor bits and range-sensor height.
+- `flight_log.csv`: 20 rows a second with x, y, z, vx, vy, vz (drone's estimate), roll, pitch, yaw, battery voltage and level, power state, supervisor bits, and Lighthouse status and active base stations.
 - `frames\`: PNG frames, `index.csv` (`idx,t,file`, read directly by C5) and `meta.csv` (size, format, bytes, arrival times).
 - `c1_summary.md` and `c1_summary.json`: the verdict; `c1_passes.csv`: one row per pass.
 - `c1_dashboard.png` (pass tracks, speed, frame rate per pass, battery) and `c1_frames.png` (one frame from each pass) for the slides.
@@ -194,7 +213,7 @@ Every message carries a sequence number and a send time, so delivery ratio and l
 2. For step 3, put the gateway and panel roles on a Raspberry Pi (or second laptop) and the drone role on the laptop, both on the same network.
     - Synchronise both clocks with chrony, otherwise one-way latency is wrong.
     - Loss on a real link is injected on Linux with `tc netem` (for example `sudo tc qdisc add dev wlan0 root netem loss 10%`, removed with `sudo tc qdisc del dev wlan0 root`). Windows has no netem; there the software loss option is the stand-in.
-3. For step 4, define the bed frame: origin on the C1 take-off cross, x along the pass line. The gateway's default panel zone is x 0.4 to 0.8 m, y -0.3 to 0.3 m, so put the panel (or a marked stand-in) at x = 0.6 m on the line.
+3. For step 4, the bed frame is the Lighthouse frame: origin on the C1 take-off cross, x along the pass line, as set in the Lighthouse set-up. The gateway's default panel zone is x 0.4 to 0.8 m, y -0.3 to 0.3 m, so put the panel (or a marked stand-in) at x = 0.6 m on the line.
 4. The real panel (Arduino, servo, IMU) is not part of C4 yet. The panel role is the panel simulator, with a 90°/s slew rate to be replaced by the C3 measurement.
 
 ### Software steps
@@ -213,7 +232,7 @@ Every message carries a sequence number and a send time, so delivery ratio and l
     - Score: `.venv\Scripts\python -m agri_loop.link.c4_report "data/c4_real/*.jsonl"` (`--json` for machine-readable output).
 4. Real drone as the beacon source (the join between C1 and C4):
     - Start the gateway and panel roles as in step 3, without the drone role.
-    - Fly C1 with `--beacon <gateway IP>`. The live Flow deck pose goes out as DroneBeacon at 10 Hz, mission type CROP_OCCLUSION during passes and NONE between them. Use `--beacon-offset X Y` only if the take-off cross is not the bed-frame origin.
+    - Fly C1 with `--beacon <gateway IP>`. The live Lighthouse pose goes out as DroneBeacon at 10 Hz, mission type CROP_OCCLUSION during passes and NONE between them. With Lighthouse the pose is already in the bed frame, so leave `--beacon-offset` at 0.
     - The sends are logged as `drone.jsonl` in the C1 run folder. Score with `c4_report data/c4_real/gateway.jsonl data/c4_real/panel.jsonl data/c1/<run>/drone.jsonl`.
     - The panel should then move as the real drone passes x = 0.6 m: a first, informal look at C6.
 
@@ -245,7 +264,7 @@ One change from the TG1 plan: the AI deck camera is monochrome, so there is no E
 ### Physical set-up
 
 1. Build the crop bed under the C1 pass line (turf or plants), with the same tape marks.
-2. Place the panel mock-up (dark, as in the real build) horizontal over the bed at x = 0.6 m, the same spot as the C4 panel zone. Two height rules apply: the Flow deck measures height to whatever is directly below, so the drone climbs by the panel's height when it crosses over the panel; and a panel turned vertical rises towards the drone. Keep the top of the vertical panel at least 0.3 m below flight height (raise flight height with `--height`), and test one slow pass with the panel vertical before recording.
+2. Place the panel mock-up (dark, as in the real build) horizontal over the bed at x = 0.6 m, the same spot as the C4 panel zone. A panel turned vertical rises towards the drone. (With Lighthouse the drone keeps its height over the panel; a Flow deck would make it climb by the panel's height.) The panel must also not block the base stations' view of the drone. Keep the top of the vertical panel at least 0.3 m below flight height (raise flight height with `--height`), and test one slow pass with the panel vertical before recording.
 3. Put a white paper patch on the bed under the panel, where a static panel hides it from the camera.
 4. Fix the lamp and the room light for all three recordings. The camera adjusts its exposure on its own, so a change in light changes the grey levels between recordings.
 5. Solve the camera direction first (C1 set-up step 5). The pipeline assumes a downward view.
@@ -302,7 +321,7 @@ Rehearsal plan:
 - [ ] Tue 20 Oct: two full 10-pass C1 runs; C5 recordings (gt, static, actuated); C5 thresholds checked on real frames.
 - [ ] Tue 20 Oct: C4 across two machines with chrony; optional C1 run with `--beacon`.
 - [ ] Tue 20 Oct: slides built from the run folders; presenter notes written.
-- [ ] Wed 21 Oct morning: batteries charged, laptop on the AI deck Wi-Fi, `pytest -q` shows 22 passed, the 3-pass live run rehearsed once.
+- [ ] Wed 21 Oct morning: batteries charged, laptop on the AI deck Wi-Fi, `pytest -q` shows 30 passed, the 3-pass live run rehearsed once.
 
 ## Risks and open checks
 
@@ -313,10 +332,12 @@ No part of C1, C4 or C5 has run on hardware yet. All C1 code is tested only agai
 | AI deck camera looks forward, not down | C5 cannot stitch the frames | 45° mirror with `--flip`; confirm in C1 pre-flight on Monday |
 | Frame rate over Wi-Fi below 20 fps | C1 frame-rate check fails | JPEG or pipelined streamer build; propose the threshold from the overlap formula |
 | Camera is monochrome | No Excess Green and no red patch, as written in the TG1 report (FR-4, Exp 1.1) | White patch and grey-level metrics; update the report text for TG2 |
-| Flow deck reads the panel as the floor | The drone climbs over the panel; a vertical panel can reach it | Keep 0.3 m clearance; slow test pass first |
-| Flow deck estimate drifts | Pass speed and straightness are judged on the drone's own estimate | Film the passes with the C2 overhead camera as the independent check |
+| A vertical panel reaches towards the drone | Collision | Keep 0.3 m clearance; slow test pass first |
+| Base stations blocked (people, panel, lamp) | Position lost mid-pass; the drone drifts or lands | Keep the view clear; the pre-flight needs 2 base stations; watch the Lighthouse LED |
+| Flow deck fails its self-test | Five red blinks; the drone will not arm while the deck is fitted | Removed; Lighthouse is the positioning source |
+| Logged pose is the drone's own estimate | Pass speed and straightness are judged on it | Film the passes with the C2 overhead camera as the independent check |
 | Battery time with two decks and Wi-Fi | Fewer than 10 passes per pack | Split into two runs and score them together; three charged packs |
-| cflib 0.1.27 installed against numpy 2.0.2, outside its declared range | A cflib function that uses numpy may fail on hardware (all imports and the 22 tests pass) | Run the pre-flight before any flight; if cflib fails, a separate venv with numpy 1.26.4 is the fallback |
+| cflib 0.1.27 installed against numpy 2.0.2, outside its declared range | A cflib function that uses numpy may fail on hardware (all imports and the tests pass) | Run the pre-flight before any flight; if cflib fails, a separate venv with numpy 1.26.4 is the fallback |
 | Radio link lost in flight | The firmware stops the motors; the drone drops | 0.6 m height over a soft mat; keep-out zone |
 | Laptop Wi-Fi is taken by the AI deck network | The laptop cannot reach the Raspberry Pi over Wi-Fi in C4 | Ethernet between laptop and Raspberry Pi |
 | Camera auto exposure | Grey levels differ between the three C5 recordings | Constant lamp and room light; calibrate C5 on real frames |
@@ -325,7 +346,7 @@ No part of C1, C4 or C5 has run on hardware yet. All C1 code is tested only agai
 
 Checks to make on our own units, in the first hardware session:
 
-- [ ] Pre-flight report shows `bcFlow2` and `bcAI` and no missing log variables.
+- [ ] Pre-flight report shows positioning "lighthouse", `bcAI`, and no missing log variables.
 - [ ] Arming works from our code (cflib 0.1.27 `send_arming_request`; untested on hardware).
 - [ ] Heading hold turns the right way: in the first 1-pass flight the drone must not spin. If it does, press Ctrl+C and flip the sign of the yaw correction in `mission.py`.
 - [ ] Frame size, format and frames per second from the stream.
@@ -341,6 +362,8 @@ Checks to make on our own units, in the first hardware session:
 - [AI deck Wi-Fi streamer example](https://www.bitcraze.io/documentation/repository/aideck-gap8-examples/master/examples/wifi-streamer/): build options (resolution, capture mode, JPEG).
 - [opencv-viewer.py in aideck-gap8-examples](https://github.com/bitcraze/aideck-gap8-examples/blob/master/examples/other/wifi-img-streamer/opencv-viewer.py): stream packet format, IP 192.168.4.1, port 5000.
 - [AI deck 1.1 datasheet](https://mouser.com/pdfDocs/ai_deck_1_1-datasheet.pdf): monochrome HM01B0 camera on version 1.1.
+- [Getting started with Lighthouse](https://www.bitcraze.io/documentation/tutorials/getting-started-with-lighthouse/): base stations, channels, geometry estimation.
+- [Lighthouse log variables](https://www.bitcraze.io/documentation/repository/crazyflie-firmware/master/api/logs/): `lighthouse.status` and `lighthouse.bsActive`.
 - [Flow deck v2 product page](https://www.bitcraze.io/products/flow-deck-v2/): sensors, range, surface.
 - [Expansion decks of the Crazyflie 2.x](https://www.bitcraze.io/documentation/system/platform/cf2-expansiondecks/): deck compatibility and pin lengths.
 - [Crazyradio Windows USB driver](https://www.bitcraze.io/documentation/repository/crazyradio-firmware/master/building/usbwindows/): Zadig and libusb.
