@@ -32,7 +32,7 @@ One drone stack, one laptop and one scene serve all three checks. Check every ro
 | Lighthouse base stations (in the lab) | Sweep the room with infrared light that the deck times | 2 to 4 V2 (or 2 V1) cover about 4 x 4 x 2 m; mounted above the flight area | Powered, unique channels, geometry estimated (see Lighthouse set-up) |
 | [Flow deck v2](https://www.bitcraze.io/products/flow-deck-v2/) (backup, not fitted) | Height and velocity from the floor | Ours fails its self-test (both sensors silent, 16 Oct), so it is removed; a failing deck stops the drone from arming | Refit only if repaired: `deck.bcFlow2 = 1` and no five-blink LED |
 | [AI deck 1.1](https://www.bitcraze.io/documentation/tutorials/getting-started-with-aideck/) | Camera and Wi-Fi image stream | GAP8 processor, ESP32 Wi-Fi, HM01B0 **monochrome** camera; 324x244 (QVGA build) or 324x324 (native build) | `deck.bcAI = 1`; which way the camera looks; frame rate over Wi-Fi |
-| Crazyradio 2.0 or PA | Commands and logs between laptop and drone | Our drone: `radio://0/80/2M/E7E7E7E7E2` (factory default ends in E7); the C1 tools use it unless `--uri` or `AGRI_CF_URI` says otherwise | Set the cfclient Address box to `0xE7E7E7E7E2` before Scan |
+| Crazyradio 2.0 or PA | Commands and logs between laptop and drone | Our drone: `radio://0/80/2M/E7E7E7E715` (factory default ends in E7); the C1 tools use it unless `--uri` or `AGRI_CF_URI` says otherwise | Set the cfclient Address box to `0xE7E7E7E715` before Scan |
 | Laptop (Windows) | Runs `agri_loop`, records the stream, scores the runs | Must join the AI deck Wi-Fi "WiFi streaming example" while the radio is plugged in | Wi-Fi and radio work at the same time |
 | Raspberry Pi or second laptop (C4 only) | Gateway and panel roles on a real network | UDP ports 5001 to 5003; clocks synchronised with chrony when on two machines | Both machines on one network |
 | Spare batteries and charger | At least three charged packs | The stock pack charges over micro-USB on the drone | Resting voltage 4.1 V or more before a run |
@@ -65,7 +65,7 @@ Every command in this guide runs from the repository root with the project's own
     - Check: the cfclient console shows `ESP32: I (910) SYS: Initialized`.
 4. Flash the Wi-Fi image streamer onto the AI deck's GAP8 processor:
     - Download `aideck_gap8_wifi_img_streamer_with_ap.bin` from the aideck-gap8-examples releases page.
-    - Run `cfloader flash aideck_gap8_wifi_img_streamer_with_ap.bin deck-bcAI:gap8-fw -w radio://0/80/2M/E7E7E7E7E2` (about 10 s).
+    - Run `cfloader flash aideck_gap8_wifi_img_streamer_with_ap.bin deck-bcAI:gap8-fw -w radio://0/80/2M/E7E7E7E715` (about 10 s).
     - Check: a Wi-Fi network called "WiFi streaming example" appears. The stream is at `192.168.4.1`, TCP port 5000.
     - The prebuilt file is the default build (raw frames, QVGA, start-stop capture). A JPEG or pipelined build is faster but needs the Docker toolchain; see C1 step 3.
 5. Create the environment and install the packages:
