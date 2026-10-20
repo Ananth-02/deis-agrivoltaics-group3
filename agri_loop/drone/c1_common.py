@@ -10,9 +10,9 @@ from .cpx_stream import FrameRecorder
 from .flightlog import LH_TO_ESTIMATOR, SUP_CAN_BE_ARMED
 from .mission import C1Config
 
-# Our lab drone uses address E7E7E7E715 (the factory default is E7E7E7E7E7).
+# Our lab drone is on channel 100, address E7E7E7E715 (factory default: channel 80, E7E7E7E7E7).
 # Another drone: pass --uri, or set the environment variable AGRI_CF_URI.
-DEFAULT_URI = os.environ.get("AGRI_CF_URI", "radio://0/80/2M/E7E7E7E715")
+DEFAULT_URI = os.environ.get("AGRI_CF_URI", "radio://0/100/2M/E7E7E7E715")
 REQUIRED_VARS = ["stateEstimate.x", "stateEstimate.y", "stateEstimate.z",
                  "stateEstimate.vx", "stateEstimate.vy", "pm.vbat"]
 
