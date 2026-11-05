@@ -116,7 +116,9 @@ class StreamStats:
     width: int = 0
     height: int = 0
     fmt: int = -1
-    error: str = ""
+    error: str = ""              # last error seen, kept even after a successful reconnect
+    reconnects: int = 0
+    gaps: List[tuple] = field(default_factory=list)   # (t_lost, t_back) per drop
     times: List[float] = field(default_factory=list)
 
     @property
@@ -130,10 +132,12 @@ class FrameRecorder:
     """Receives frames on one thread and writes PNGs on another, so disk writes never stall the socket."""
 
     def __init__(self, out_dir: str, ip: str = DEFAULT_IP, port: int = DEFAULT_PORT,
-                 debayer: bool = False, save: bool = True, timeout_s: float = 5.0, flip: str = "none") -> None:
+                 debayer: bool = False, save: bool = True, timeout_s: float = 5.0, flip: str = "none",
+                 retry_s: float = 1.0) -> None:
         self.out_dir = out_dir
         self.ip, self.port = ip, port
         self.debayer, self.save, self.timeout_s, self.flip = debayer, save, timeout_s, flip
+        self.retry_s = retry_s
         self.stats = StreamStats()
         self._stop = threading.Event()
         self._q: "queue.Queue[Optional[tuple]]" = queue.Queue(maxsize=600)
@@ -166,29 +170,50 @@ class FrameRecorder:
         return self.stats
 
     def _rx_loop(self) -> None:
-        try:
-            self._sock = socket.create_connection((self.ip, self.port), timeout=self.timeout_s)
-            self._sock.settimeout(self.timeout_s)
-            self.connected.set()
-            rx = socket_rx(self._sock)
-            idx = 0
-            while not self._stop.is_set():
-                fr = read_frame(rx)
-                st = self.stats
-                if st.t_first is None:
-                    st.t_first = fr.t
-                st.t_last = fr.t
-                st.frames += 1
-                st.times.append(fr.t)
-                st.width, st.height, st.fmt = fr.width, fr.height, fr.fmt
-                try:
-                    self._q.put_nowait((idx, fr))
-                except queue.Full:
-                    st.dropped += 1
-                idx += 1
-        except Exception as e:  # noqa: BLE001 - reported in stats, flight code decides what to do
-            if not self._stop.is_set():
+        """Receive frames; after a dropped connection, keep reconnecting until stop() is called."""
+        idx = 0
+        t_lost: Optional[float] = None
+        while not self._stop.is_set():
+            try:
+                self._sock = socket.create_connection((self.ip, self.port), timeout=self.timeout_s)
+                self._sock.settimeout(self.timeout_s)
+                if t_lost is not None:
+                    self.stats.reconnects += 1
+                    self.stats.gaps.append((t_lost, time.time()))
+                    t_lost = None
+                self.connected.set()
+                rx = socket_rx(self._sock)
+                while not self._stop.is_set():
+                    fr = read_frame(rx)
+                    st = self.stats
+                    if st.t_first is None:
+                        st.t_first = fr.t
+                    st.t_last = fr.t
+                    st.frames += 1
+                    st.times.append(fr.t)
+                    st.width, st.height, st.fmt = fr.width, fr.height, fr.fmt
+                    try:
+                        self._q.put_nowait((idx, fr))
+                    except queue.Full:
+                        st.dropped += 1
+                    idx += 1
+            except Exception as e:  # noqa: BLE001 - reported in stats, the run carries on
+                if self._stop.is_set():
+                    break
                 self.stats.error = f"{type(e).__name__}: {e}"
+                if t_lost is None:
+                    t_lost = time.time()
+                if self._sock is not None:
+                    try:
+                        self._sock.close()
+                    except OSError:
+                        pass
+                self._stop.wait(self.retry_s)
+        if self._sock is not None:  # a reconnect may have opened a socket after stop() closed the old one
+            try:
+                self._sock.close()
+            except OSError:
+                pass
 
     def _wr_loop(self) -> None:
         with open(os.path.join(self.out_dir, "index.csv"), "w", newline="") as fi, \

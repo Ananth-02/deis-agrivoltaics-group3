@@ -38,6 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--speed", type=float, default=0.20, help="pass speed, m/s")
     ap.add_argument("--height", type=float, default=0.60, help="flight height, m")
     ap.add_argument("--pause", type=float, default=2.0, help="hover between passes, s")
+    ap.add_argument("--accel", type=float, default=0.2, help="acceleration and braking, m/s^2")
+    ap.add_argument("--control", default="auto", choices=["auto", "position", "velocity"],
+                    help="pass control: auto = position with Lighthouse, velocity otherwise")
     ap.add_argument("--min-vbat", type=float, default=3.8, help="refuse take-off below this voltage")
     ap.add_argument("--fps-min", type=float, default=20.0, help="C1 frame-rate threshold")
     ap.add_argument("--sim-fps", type=float, default=15.0, help="frame rate of the simulated AI deck")
@@ -53,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     a = build_parser().parse_args(argv)
     cfg = C1Config(n_passes=a.passes, pass_length_m=a.length, speed_m_s=a.speed, height_m=a.height,
-                   pause_s=a.pause, min_start_vbat=a.min_vbat)
+                   pause_s=a.pause, accel_m_s2=a.accel, min_start_vbat=a.min_vbat)
     run_dir = new_run_dir(a.out, a.label or ("sim" if a.sim else "fly"))
     save_json(os.path.join(run_dir, "config.json"), dict(args=vars(a), mission=cfg.to_dict()))
     events = EventLog()
@@ -71,7 +74,7 @@ def main(argv=None) -> int:
     else:
         from .vehicle import CrazyflieVehicle
 
-        vehicle = CrazyflieVehicle(a.uri, logger).open()
+        vehicle = CrazyflieVehicle(a.uri, logger, console_path=os.path.join(run_dir, "console.log")).open()
         vehicle.start_logging()
         time.sleep(1.5)
 
@@ -84,13 +87,17 @@ def main(argv=None) -> int:
         if not ok:
             print("Not flying: " + "; ".join(problems))
             return 2
+        cfg.pass_control = a.control if a.control != "auto" else (
+            "position" if report.get("positioning") == "lighthouse" else "velocity")
+        print(f"Pass control: {cfg.pass_control}")
         if not a.no_camera:
             recorder = FrameRecorder(os.path.join(run_dir, "frames"), ip, port, debayer=a.debayer, flip=a.flip).start()
             st = stream_check(recorder, 2.0)
             events.add("stream_check", time.time(), **st)
             print_report("Camera stream", st)
             if not st["ok"]:
-                print("Not flying: no frames from the AI deck (use --no-camera to fly without it)")
+                print("Not flying: the AI deck stream is missing or too slow. Switch the drone off and on, "
+                      "rejoin \"WiFi streaming example\", then retry (or use --no-camera)")
                 return 3
         if a.fly:
             print("\nTaking off in 3 s. Ctrl+C lands the drone.")
@@ -108,7 +115,8 @@ def main(argv=None) -> int:
             stats = recorder.stop()
             events.add("stream_stats", time.time(), frames=stats.frames, fps=stats.fps, width=stats.width,
                        height=stats.height, format=stats.fmt, dropped=stats.dropped,
-                       decode_errors=stats.decode_errors, error=stats.error)
+                       decode_errors=stats.decode_errors, error=stats.error,
+                       reconnects=stats.reconnects, gaps=[[round(a, 3), round(b, 3)] for a, b in stats.gaps])
         if deck is not None:
             deck.stop()
         if beacon is not None:

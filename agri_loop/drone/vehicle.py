@@ -41,7 +41,7 @@ def _toc_has(toc: Any, name: str) -> bool:
 
 class CrazyflieVehicle:
     def __init__(self, uri: str, logger: Optional[FlightLogger] = None,
-                 fast_ms: int = 50, slow_ms: int = 100) -> None:
+                 fast_ms: int = 50, slow_ms: int = 100, console_path: Optional[str] = None) -> None:
         import cflib.crtp
         from cflib.crazyflie import Crazyflie
         from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
@@ -58,10 +58,15 @@ class CrazyflieVehicle:
         self._latest: Dict[str, Any] = {}
         self._lock = threading.Lock()
         self._confs: List[Any] = []
+        self._console = open(console_path, "a", encoding="utf-8") if console_path else None
+        self._console_buf = ""
+        self._console_lock = threading.Lock()
 
     # ---- connection ----
     def open(self) -> "CrazyflieVehicle":
         self.cf.connection_lost.add_callback(self._on_lost)
+        if self._console is not None:
+            self.cf.console.receivedChar.add_callback(self._on_console)
         self.scf.open_link()
         return self
 
@@ -71,7 +76,29 @@ class CrazyflieVehicle:
                 c.stop()
             except Exception:  # noqa: BLE001
                 pass
+        if self._console is not None:
+            self.cf.console.receivedChar.remove_callback(self._on_console)
         self.scf.close_link()
+        if self._console is not None:
+            with self._console_lock:
+                self._console.close()
+
+    def _on_console(self, text: str) -> None:
+        """Drone console text, one host timestamp per line (AI deck and ESP32 messages arrive here).
+
+        Text arrives in chunks that split lines, so a partial line waits until its newline arrives."""
+        with self._console_lock:
+            if self._console.closed:  # text that arrives while the link is closing is dropped
+                return
+            self._write_console(text)
+
+    def _write_console(self, text: str) -> None:
+        self._console_buf += text
+        nl = chr(10)
+        while nl in self._console_buf:
+            line, self._console_buf = self._console_buf.split(nl, 1)
+            self._console.write(f"{time.time():.3f} {line.rstrip()}{nl}")
+        self._console.flush()
 
     def _on_lost(self, uri: str, msg: str) -> None:
         self.link_error = msg
@@ -146,6 +173,10 @@ class CrazyflieVehicle:
 
     def hover(self, vx: float, vy: float, yawrate: float, z: float) -> None:
         self.cf.commander.send_hover_setpoint(vx, vy, yawrate, z)
+
+    def position(self, x: float, y: float, z: float, yaw_deg: float) -> None:
+        """Absolute position setpoint in the positioning frame (Lighthouse), heading in degrees."""
+        self.cf.commander.send_position_setpoint(x, y, z, yaw_deg)
 
     def stop_motors(self) -> None:
         self.cf.commander.send_stop_setpoint()

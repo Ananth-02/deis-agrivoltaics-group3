@@ -4,9 +4,15 @@ Passes run along the x axis of the Flow deck frame (x forward at power-up,
 origin where the drone took off). With `alternate` the passes go out and back
 on the same line, so the room only needs to be pass_length_m long.
 
-Each pass: ramp up at accel_m_s2, hold speed_m_s, brake so it stops on the
-end of the line, hold position for pause_s. Lateral position and heading are
-held with small proportional corrections, so the pass stays straight.
+Each pass follows a trapezoid speed profile: ramp up at accel_m_s2, hold
+speed_m_s, brake so it stops on the end of the line, then hold for pause_s.
+Two ways to fly it (pass_control):
+    "position": a position target slides along the line on that profile and the
+                drone's position controller tracks it. Needs absolute positioning
+                (Lighthouse) and gives the steadiest speed.
+    "velocity": velocity (hover) setpoints on the same profile, with small
+                proportional corrections for sideways drift and heading. Works
+                with the Flow deck, which has no absolute position.
 
 Safety (checked on every 20 Hz tick, any one lands or cuts the motors):
     link lost, battery below land_vbat for 1 s or pm.state LOW_POWER,
@@ -30,7 +36,7 @@ class C1Config:
     pass_length_m: float = 1.5
     speed_m_s: float = 0.20
     height_m: float = 0.60
-    accel_m_s2: float = 0.40
+    accel_m_s2: float = 0.20
     pause_s: float = 2.0
     takeoff_s: float = 2.5
     settle_s: float = 2.0
@@ -46,6 +52,7 @@ class C1Config:
     land_vbat: float = 3.3         # land if below this for 1 s in flight
     max_tilt_deg: float = 45.0
     pass_timeout_factor: float = 2.0
+    pass_control: str = "velocity"   # "velocity" or "position" (see module docstring)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -60,6 +67,30 @@ class MissionAbort(Exception):
 
 def _clip(v: float, lim: float) -> float:
     return max(-lim, min(lim, v))
+
+
+def trapezoid(t: float, length: float, speed: float, accel: float):
+    """Distance along the pass at time t for a trapezoid (or, if short, triangle) speed profile.
+
+    Returns (distance, total_time)."""
+    t_acc = speed / accel
+    d_acc = 0.5 * accel * t_acc ** 2
+    if 2 * d_acc > length:  # never reaches cruise speed
+        t_acc = math.sqrt(length / accel)
+        speed = accel * t_acc
+        d_acc = 0.5 * length
+    t_cruise = (length - 2 * d_acc) / speed
+    total = 2 * t_acc + t_cruise
+    if t <= 0:
+        return 0.0, total
+    if t < t_acc:
+        return 0.5 * accel * t * t, total
+    if t < t_acc + t_cruise:
+        return d_acc + speed * (t - t_acc), total
+    if t < total:
+        left = total - t
+        return length - 0.5 * accel * left * left, total
+    return length, total
 
 
 class Mission:
@@ -120,6 +151,13 @@ class Mission:
         yawrate = _clip(self.cfg.yaw_gain * yaw_deg, 30.0)
         self.v.hover(vx_b, vy_b, yawrate, z)
 
+    def _position_mode(self) -> bool:
+        return self.cfg.pass_control == "position"
+
+    def _send_pos(self, x: float, z: float) -> None:
+        """Absolute position target on the pass line (y of the take-off point), heading 0."""
+        self.v.position(x, self.home[1], z, 0.0)
+
     def _lateral(self, s: Dict[str, Any]) -> float:
         return _clip(-self.cfg.lateral_gain * (s["y"] - self.home[1]), self.cfg.max_correction_m_s)
 
@@ -138,8 +176,11 @@ class Mission:
             s = self._state()
             self._check(s, critical_only)
             zz = z if z_from is None else z_from + (z - z_from) * min(1.0, (self.clock() - t0) / duration)
-            vx = _clip(self.cfg.hold_gain * (x_target - s["x"]), self.cfg.max_correction_m_s)
-            self._send_world(s, vx, self._lateral(s), zz)
+            if self._position_mode():
+                self._send_pos(x_target, zz)
+            else:
+                vx = _clip(self.cfg.hold_gain * (x_target - s["x"]), self.cfg.max_correction_m_s)
+                self._send_world(s, vx, self._lateral(s), zz)
             t_next = self._tick(t_next)
 
     # ---- phases ----
@@ -169,11 +210,14 @@ class Mission:
             self._hold(x0, c.height_m, max(c.pause_s, c.pass_length_m / max(c.max_correction_m_s, 1e-3)))
         timeout = c.pass_timeout_factor * c.pass_length_m / c.speed_m_s + 3.0
         t0 = self.clock()
-        self.ev.add("pass_start", t0, i=i, direction=int(direction), x0=x0, x1=x1, speed_cmd=c.speed_m_s)
+        self.ev.add("pass_start", t0, i=i, direction=int(direction), x0=x0, x1=x1, speed_cmd=c.speed_m_s,
+                    control=c.pass_control)
         t_next = t0
         reason = "reached"
         self.in_pass = True
-        while True:
+        if self._position_mode():
+            reason = self._pass_position(x0, x1, direction, t0, timeout)
+        while not self._position_mode():
             s = self._state()
             self._check(s)
             remaining = direction * (x1 - s["x"])
@@ -191,6 +235,22 @@ class Mission:
         self.ev.add("pass_end", self.clock(), i=i, reason=reason)
         self.passes_done += 1
         self._hold(x1, c.height_m, c.pause_s)
+
+    def _pass_position(self, x0: float, x1: float, direction: float, t0: float, timeout: float) -> str:
+        """Slide the position target from x0 to x1 on the speed profile; done once the drone is at x1."""
+        c = self.cfg
+        t_next = t0
+        while True:
+            s = self._state()
+            self._check(s)
+            t = self.clock() - t0
+            dist, total = trapezoid(t, c.pass_length_m, c.speed_m_s, c.accel_m_s2)
+            if t >= total and abs(x1 - s["x"]) <= 0.03:
+                return "reached"
+            if t > timeout:
+                return "timeout"
+            self._send_pos(x0 + direction * dist, c.height_m)
+            t_next = self._tick(t_next)
 
     def land(self) -> None:
         c = self.cfg

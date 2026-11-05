@@ -223,7 +223,7 @@ def plot_dashboard(runs: List[Dict[str, Any]], summary: Dict[str, Any], out_dir:
         ax[0, 1].plot(tt, speed, lw=0.8, color="tab:blue")
         ax[1, 1].plot(tt, log["vbat"], lw=0.8, color="tab:green")
     v_cmd = runs[0]["config"].get("speed_m_s", 0.2) if runs else 0.2
-    ax[0, 0].set(title="Pass tracks (Flow deck estimate)", xlabel="x (m)", ylabel="y (m)")
+    ax[0, 0].set(title="Pass tracks (drone's position estimate)", xlabel="x (m)", ylabel="y (m)")
     ax[0, 0].set_aspect("equal", adjustable="datalim")
     ax[0, 1].axhline(v_cmd, ls="--", color="k", lw=0.8)
     ax[0, 1].set(title="Ground speed, passes shaded", xlabel="time (s)", ylabel="speed (m/s)")
@@ -267,6 +267,7 @@ def contact_sheet(runs: List[Dict[str, Any]], out_dir: str, cols: int = 5) -> Op
             tiles.append(img)
     if not tiles:
         return None
+    cols = min(cols, len(tiles))
     h = max(t.shape[0] for t in tiles)
     tiles = [np.pad(t, ((0, h - t.shape[0]), (0, 0))) for t in tiles]
     while len(tiles) % cols:

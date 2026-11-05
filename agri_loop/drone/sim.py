@@ -77,6 +77,23 @@ class SimVehicle:
             self.cmd = (vx, vy, yawrate, z)
             self.flying = True
 
+    def position(self, x: float, y: float, z: float, yaw_deg: float) -> None:
+        """Simulated position controller: P gain on the position error, mapped to body velocity."""
+        if not self.armed:
+            return
+        with self._lock:
+            s = dict(self._latest)
+        if "x" not in s:
+            return
+        k, vmax = 2.0, 0.6
+        vx_w = max(-vmax, min(vmax, k * (x - s["x"])))
+        vy_w = max(-vmax, min(vmax, k * (y - s["y"])))
+        yaw = math.radians(s.get("yaw", 0.0))
+        vx_b = math.cos(yaw) * vx_w + math.sin(yaw) * vy_w
+        vy_b = -math.sin(yaw) * vx_w + math.cos(yaw) * vy_w
+        yawrate = max(-30.0, min(30.0, 1.0 * (s.get("yaw", 0.0) - yaw_deg)))
+        self.hover(vx_b, vy_b, yawrate, z)
+
     def stop_motors(self) -> None:
         self.cmd = (0.0, 0.0, 0.0, 0.0)
         self.flying = False
@@ -162,7 +179,8 @@ class FakeAIDeck:
     """TCP server speaking the wifi-img-streamer CPX format."""
 
     def __init__(self, pose: Callable[[], Tuple[float, float, float]], fps: float = 15.0,
-                 width: int = 324, height: int = 244, port: int = 0, px_per_m: float = 600.0) -> None:
+                 width: int = 324, height: int = 244, port: int = 0, px_per_m: float = 600.0,
+                 drop_after: int = 0) -> None:
         self.pose, self.fps = pose, fps
         self.width, self.height = width, height
         self.px_per_m = px_per_m
@@ -175,6 +193,7 @@ class FakeAIDeck:
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._serve, name="fake-aideck", daemon=True)
         self.sent = 0
+        self.drop_after = drop_after   # close the first connection after this many frames (test of reconnect)
 
     def start(self) -> "FakeAIDeck":
         self._thread.start()
@@ -209,6 +228,8 @@ class FakeAIDeck:
                 while not self._stop.is_set():
                     conn.sendall(encode_packets(self.frame(), FMT_RAW))
                     self.sent += 1
+                    if self.drop_after and self.sent == self.drop_after:
+                        break
                     t_next += 1.0 / self.fps
                     time.sleep(max(0.0, t_next - time.time()))
             except OSError:

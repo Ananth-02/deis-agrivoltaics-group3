@@ -164,3 +164,48 @@ def test_preflight_warns_when_not_facing_lighthouse_x():
     s = dict(_GROUND, yaw=40.0, lh_status=2, lh_active=0b11)
     passed, report, _ = preflight(_FakeCF({"bcLighthouse4": True, "bcAI": True}, **s), C1Config(), need_camera=True)
     assert passed and any("Lighthouse x axis" in w for w in report["warnings"])
+
+
+def test_trapezoid_profile_ends_and_cruises():
+    from agri_loop.drone.mission import trapezoid
+    d, total = trapezoid(0.0, 1.5, 0.2, 0.2)
+    assert d == 0.0 and total == pytest.approx(1.5 / 0.2 + 0.2 / 0.2)
+    assert trapezoid(total, 1.5, 0.2, 0.2)[0] == pytest.approx(1.5)
+    mid1, _ = trapezoid(3.0, 1.5, 0.2, 0.2)
+    mid2, _ = trapezoid(4.0, 1.5, 0.2, 0.2)
+    assert mid2 - mid1 == pytest.approx(0.2)            # cruising at 0.2 m/s
+    short, t_short = trapezoid(99, 0.05, 0.2, 0.2)       # too short to reach cruise speed
+    assert short == pytest.approx(0.05) and t_short == pytest.approx(2 * (0.05 / 0.2) ** 0.5)
+
+
+def test_sim_mission_position_control(tmp_path):
+    run = tmp_path / "run"
+    (run / "frames").mkdir(parents=True)
+    logger = FlightLogger(str(run / "flight_log.csv"))
+    v = SimVehicle(logger).open()
+    ev = EventLog()
+    cfg = C1Config(n_passes=2, pass_length_m=0.6, speed_m_s=0.2, accel_m_s2=0.4, pause_s=0.3,
+                   takeoff_s=1.0, settle_s=0.5, land_s=0.8, pass_control="position")
+    res = Mission(v, cfg, ev).run()
+    logger.close()
+    v.close()
+    ev.save(str(run / "events.jsonl"))
+    assert res["passes_done"] == 2 and not res["aborted"]
+    ends = [e for e in EventLog.load(str(run / "events.jsonl")) if e["ev"] == "pass_end"]
+    assert [e["reason"] for e in ends] == ["reached", "reached"]
+    s = analyse_run(str(run), C1Criteria(n_passes=2, fps_min=0))
+    assert all(abs(p["speed_mean"] - 0.2) < 0.03 for p in s["passes"]), s["passes"]
+    assert all(p["lateral_rms_m"] < 0.02 for p in s["passes"])
+
+
+def test_recorder_reconnects_after_drop(tmp_path):
+    deck = FakeAIDeck(lambda: (0.0, 0.0, 0.5), fps=30, drop_after=10).start()
+    rec = FrameRecorder(str(tmp_path / "frames"), "127.0.0.1", deck.port, retry_s=0.2).start()
+    time.sleep(2.0)
+    st = rec.stop()
+    deck.stop()
+    assert st.reconnects >= 1 and len(st.gaps) == st.reconnects
+    assert st.frames > 20                      # frames kept coming after the drop
+    with open(tmp_path / "frames" / "index.csv", newline="") as f:
+        idx = [int(r["idx"]) for r in csv.DictReader(f)]
+    assert idx == list(range(len(idx)))       # numbering continues across the reconnect

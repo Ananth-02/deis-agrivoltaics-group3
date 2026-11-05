@@ -95,16 +95,20 @@ def lighthouse_problem(s: Dict[str, Any]) -> str:
             "move the drone into view of more base stations")
 
 
-def stream_check(recorder: FrameRecorder, seconds: float) -> Dict[str, Any]:
-    """Wait for the stream and measure it for `seconds` before anything flies."""
+def stream_check(recorder: FrameRecorder, seconds: float, min_fps: float = 5.0) -> Dict[str, Any]:
+    """Wait for the stream and measure it for `seconds` before anything flies.
+
+    A stuck AI deck streamer accepts the connection but sends almost nothing (seen on 20 Oct
+    after a drop at motor start), so a trickle of frames below min_fps also fails the check."""
     if not recorder.connected.wait(timeout=recorder.timeout_s + 1):
         return dict(ok=False, error=recorder.stats.error or "could not connect to the AI deck")
     n0 = recorder.stats.frames
     t0 = time.time()
     time.sleep(seconds)
     n = recorder.stats.frames - n0
+    fps = n / max(time.time() - t0, 1e-6)
     st = recorder.stats
-    return dict(ok=n > 0 and not st.error, frames=n, fps=n / max(time.time() - t0, 1e-6),
+    return dict(ok=fps >= min_fps and not st.error, frames=n, fps=fps,
                 width=st.width, height=st.height, format="jpeg" if st.fmt == 1 else "raw", error=st.error)
 
 
