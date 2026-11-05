@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
 
-from .cpx_stream import FMT_RAW, encode_packets
+from .cpx_stream import FMT_RAW, PROTO_BITCRAZE, PROTO_NANOCOCKPIT, encode_nanocockpit_packets, encode_packets
 from .flightlog import FlightLogger, SUP_CAN_BE_ARMED, SUP_CAN_FLY, SUP_IS_ARMED, SUP_IS_FLYING
 
 
@@ -176,13 +176,18 @@ def synthetic_bed(w_px: int = 2400, h_px: int = 1400, seed: int = 1) -> np.ndarr
 
 
 class FakeAIDeck:
-    """TCP server speaking the wifi-img-streamer CPX format."""
+    """TCP server speaking the wifi-img-streamer (default) or NanoCockpit CPX format.
+
+    Frame size defaults to what each firmware sends: 324x244 Bitcraze, 160x160 NanoCockpit."""
 
     def __init__(self, pose: Callable[[], Tuple[float, float, float]], fps: float = 15.0,
-                 width: int = 324, height: int = 244, port: int = 0, px_per_m: float = 600.0,
-                 drop_after: int = 0) -> None:
+                 width: Optional[int] = None, height: Optional[int] = None, port: int = 0,
+                 px_per_m: float = 600.0, drop_after: int = 0, protocol: str = PROTO_BITCRAZE) -> None:
         self.pose, self.fps = pose, fps
-        self.width, self.height = width, height
+        self.protocol = protocol
+        nc = protocol == PROTO_NANOCOCKPIT
+        self.width = width or (160 if nc else 324)
+        self.height = height or (160 if nc else 244)
         self.px_per_m = px_per_m
         self.bed = synthetic_bed()
         self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -226,7 +231,11 @@ class FakeAIDeck:
             t_next = time.time()
             try:
                 while not self._stop.is_set():
-                    conn.sendall(encode_packets(self.frame(), FMT_RAW))
+                    if self.protocol == PROTO_NANOCOCKPIT:
+                        conn.sendall(encode_nanocockpit_packets(self.frame(), self.sent, int(time.time() * 1e6),
+                                                                checksum=True))
+                    else:
+                        conn.sendall(encode_packets(self.frame(), FMT_RAW))
                     self.sent += 1
                     if self.drop_after and self.sent == self.drop_after:
                         break

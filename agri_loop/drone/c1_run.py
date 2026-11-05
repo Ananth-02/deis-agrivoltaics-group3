@@ -17,7 +17,7 @@ import time
 from ..link.eventlog import EventLog
 from .c1_analysis import C1Criteria, analyse_run, combine, contact_sheet, plot_dashboard, write_summary
 from .c1_common import DEFAULT_URI, new_run_dir, preflight, print_report, save_json, stream_check
-from .cpx_stream import DEFAULT_IP, DEFAULT_PORT, FrameRecorder
+from .cpx_stream import DEFAULT_PORT, PROTOCOLS, FrameRecorder, default_host, default_protocol
 from .flightlog import FlightLogger
 from .mission import C1Config, Mission
 
@@ -28,7 +28,11 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--sim", action="store_true", help="simulated drone and AI deck")
     mode.add_argument("--fly", action="store_true", help="fly the real Crazyflie")
     ap.add_argument("--uri", default=DEFAULT_URI)
-    ap.add_argument("--aideck-ip", default=DEFAULT_IP)
+    ap.add_argument("--aideck-proto", default=default_protocol(), choices=PROTOCOLS,
+                    help="AI deck streamer firmware (default: $AGRI_AIDECK_PROTO, else bitcraze)")
+    ap.add_argument("--aideck-ip", default=None,
+                    help="AI deck address (default: $AGRI_AIDECK_IP, else 192.168.4.1 for bitcraze, "
+                         "aideck.local for nanocockpit)")
     ap.add_argument("--aideck-port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--no-camera", action="store_true", help="fly without the AI deck stream")
     ap.add_argument("--debayer", action="store_true", help="only for a colour (Bayer) camera module")
@@ -55,7 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     a = build_parser().parse_args(argv)
-    cfg = C1Config(n_passes=a.passes, pass_length_m=a.length, speed_m_s=a.speed, height_m=a.height,
+    a.aideck_ip = a.aideck_ip or default_host(a.aideck_proto)
+    cfg =C1Config(n_passes=a.passes, pass_length_m=a.length, speed_m_s=a.speed, height_m=a.height,
                    pause_s=a.pause, accel_m_s2=a.accel, min_start_vbat=a.min_vbat)
     run_dir = new_run_dir(a.out, a.label or ("sim" if a.sim else "fly"))
     save_json(os.path.join(run_dir, "config.json"), dict(args=vars(a), mission=cfg.to_dict()))
@@ -69,7 +74,7 @@ def main(argv=None) -> int:
 
         vehicle = SimVehicle(logger).open()
         if not a.no_camera:
-            deck = FakeAIDeck(vehicle.pose, fps=a.sim_fps).start()
+            deck = FakeAIDeck(vehicle.pose, fps=a.sim_fps, protocol=a.aideck_proto).start()
             ip, port = "127.0.0.1", deck.port
     else:
         from .vehicle import CrazyflieVehicle
@@ -91,13 +96,15 @@ def main(argv=None) -> int:
             "position" if report.get("positioning") == "lighthouse" else "velocity")
         print(f"Pass control: {cfg.pass_control}")
         if not a.no_camera:
-            recorder = FrameRecorder(os.path.join(run_dir, "frames"), ip, port, debayer=a.debayer, flip=a.flip).start()
+            recorder = FrameRecorder(os.path.join(run_dir, "frames"), ip, port, debayer=a.debayer, flip=a.flip,
+                                     protocol=a.aideck_proto).start()
             st = stream_check(recorder, 2.0)
             events.add("stream_check", time.time(), **st)
             print_report("Camera stream", st)
             if not st["ok"]:
-                print("Not flying: the AI deck stream is missing or too slow. Switch the drone off and on, "
-                      "rejoin \"WiFi streaming example\", then retry (or use --no-camera)")
+                print(f"Not flying: the AI deck stream from {ip}:{port} ({a.aideck_proto}) is missing or too slow. "
+                      "Switch the drone off and on, check the deck is on the same Wi-Fi as this computer, "
+                      "then retry (or use --no-camera)")
                 return 3
         if a.fly:
             print("\nTaking off in 3 s. Ctrl+C lands the drone.")

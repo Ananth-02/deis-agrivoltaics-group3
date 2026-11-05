@@ -2,7 +2,10 @@
 
     python -m agri_loop.drone.c1_preflight                      # radio + decks + battery
     python -m agri_loop.drone.c1_preflight --stream 10          # also record 10 s from the AI deck
-    python -m agri_loop.drone.c1_preflight --stream 10 --no-radio   # camera only (laptop on the AI deck Wi-Fi)
+    python -m agri_loop.drone.c1_preflight --stream 10 --no-radio   # camera only, no Crazyradio
+    python -m agri_loop.drone.c1_preflight --stream 10 --no-radio --aideck-proto nanocockpit   # NanoCockpit deck
+
+The AI deck firmware and address default to $AGRI_AIDECK_PROTO and $AGRI_AIDECK_IP when set.
 """
 from __future__ import annotations
 
@@ -12,7 +15,7 @@ import sys
 import time
 
 from .c1_common import DEFAULT_URI, new_run_dir, preflight, print_report, save_json, stream_check
-from .cpx_stream import DEFAULT_IP, DEFAULT_PORT, FrameRecorder
+from .cpx_stream import DEFAULT_PORT, PROTOCOLS, FrameRecorder, default_host, default_protocol
 from .mission import C1Config
 
 
@@ -21,11 +24,13 @@ def main(argv=None) -> int:
     ap.add_argument("--uri", default=DEFAULT_URI)
     ap.add_argument("--no-radio", action="store_true", help="skip the Crazyradio checks")
     ap.add_argument("--stream", type=float, default=0.0, metavar="S", help="record S seconds from the AI deck")
-    ap.add_argument("--aideck-ip", default=DEFAULT_IP)
+    ap.add_argument("--aideck-proto", default=default_protocol(), choices=PROTOCOLS)
+    ap.add_argument("--aideck-ip", default=None)
     ap.add_argument("--aideck-port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--flip", default="none", choices=["none", "h", "v", "hv"])
     ap.add_argument("--out", default=os.path.join("data", "c1"))
     a = ap.parse_args(argv)
+    a.aideck_ip = a.aideck_ip or default_host(a.aideck_proto)
 
     run_dir = new_run_dir(a.out, "preflight")
     result = {}
@@ -44,7 +49,9 @@ def main(argv=None) -> int:
         finally:
             v.close()
     if a.stream > 0:
-        rec = FrameRecorder(os.path.join(run_dir, "frames"), a.aideck_ip, a.aideck_port, flip=a.flip).start()
+        rec = FrameRecorder(os.path.join(run_dir, "frames"), a.aideck_ip, a.aideck_port, flip=a.flip,
+                            protocol=a.aideck_proto).start()
+        print(f"Recording {a.stream:g} s from {a.aideck_ip}:{a.aideck_port} ({a.aideck_proto})")
         st = stream_check(rec, a.stream)
         stats = rec.stop()
         st.update(dropped=stats.dropped, decode_errors=stats.decode_errors)

@@ -7,7 +7,9 @@ import numpy as np
 import pytest
 
 from agri_loop.drone.c1_analysis import C1Criteria, analyse_run, combine, write_summary
-from agri_loop.drone.cpx_stream import FMT_JPEG, FMT_RAW, FrameRecorder, decode_frame, encode_packets, read_frame
+from agri_loop.drone.cpx_stream import (FMT_JPEG, FMT_RAW, PROTO_NANOCOCKPIT, FrameRecorder, decode_frame,
+                                        default_host, default_protocol, encode_nanocockpit_packets, encode_packets,
+                                        read_frame, read_frame_nanocockpit)
 from agri_loop.drone.flightlog import FlightLogger
 from agri_loop.drone.mission import C1Config, Mission
 from agri_loop.drone.sim import FakeAIDeck, SimVehicle
@@ -62,6 +64,74 @@ def test_recorder_writes_c5_index(tmp_path):
         rows = list(csv.DictReader(f))
     assert list(rows[0].keys()) == ["idx", "t", "file"]
     assert os.path.exists(tmp_path / "frames" / rows[0]["file"])
+
+
+def test_nanocockpit_hand_built_packets():
+    """Bytes written out from the NanoCockpit source (tcp.py, streamer.c, streamer.h), not from our encoder."""
+    import struct
+    w, h = 4, 3
+    pixels = bytes(range(12))
+    meta = bytearray(148)
+    meta[0] = 10                                   # metadata_version
+    meta[1:5] = struct.pack("<HH", w, h)           # frame_width, frame_height
+    meta[5], meta[6], meta[7] = 1, 0, 42           # frame_bpp, frame_format GRAY_8, frame_id
+    meta[8:12] = struct.pack("<I", 123456)         # frame_timestamp [usec]
+    buf = bytes(meta) + pixels                     # 160 bytes
+    first, rest = buf[:100], buf[100:]             # 60 bytes left, already a multiple of 4 (no padding)
+    begin = b"\x10\x01" + struct.pack("<II", len(buf), 0) + b"\x00\x00" + first
+    data = b"\x11\x00\x00\x00" + rest
+    console = b"hello"                             # a CPX console packet (function 0x02) is skipped
+    stream = (struct.pack("<H", len(console)) + b"\x61\x02" + console
+              + struct.pack("<H", len(begin)) + b"\x63\x06" + begin
+              + struct.pack("<H", len(data)) + b"\x63\x06" + data)
+    fr = read_frame_nanocockpit(_reader(stream))
+    assert (fr.width, fr.height, fr.deck_id, fr.deck_t_us) == (4, 3, 42, 123456)
+    assert np.array_equal(decode_frame(fr), np.frombuffer(pixels, np.uint8).reshape(3, 4))
+
+
+def test_nanocockpit_roundtrip_padding_checksum_and_skips():
+    rng = np.random.default_rng(1)
+    img = rng.integers(0, 256, (160, 160), dtype=np.uint8)
+    other = encode_nanocockpit_packets(np.zeros((2, 2), np.uint8))
+    other = other[:5] + b"\xf0" + other[6:]          # same buffer marked INFERENCE (0xF0): not an image
+    bad = bytearray(encode_nanocockpit_packets(img, checksum=True, mtu=1000))
+    bad[-10] ^= 0xFF                                  # corrupt a pixel: crc32 fails, frame dropped
+    good = encode_nanocockpit_packets(img, frame_id=300, t_us=7, checksum=True, mtu=1000)
+    fr = read_frame_nanocockpit(_reader(other + bytes(bad) + good))
+    assert (fr.width, fr.height, fr.deck_id, fr.deck_t_us) == (160, 160, 300 & 0xFF, 7)
+    assert np.array_equal(decode_frame(fr), img)
+
+
+def test_nanocockpit_unknown_metadata_version_is_reported():
+    pk = bytearray(encode_nanocockpit_packets(np.zeros((2, 2), np.uint8)))
+    pk[4 + 12] = 11                                   # metadata_version right after the BEGIN header
+    with pytest.raises(ValueError, match="v11"):
+        read_frame_nanocockpit(_reader(bytes(pk)))
+
+
+def test_recorder_nanocockpit(tmp_path):
+    deck = FakeAIDeck(lambda: (0.0, 0.0, 0.5), fps=30, protocol=PROTO_NANOCOCKPIT).start()
+    rec = FrameRecorder(str(tmp_path / "frames"), "127.0.0.1", deck.port, protocol=PROTO_NANOCOCKPIT).start()
+    time.sleep(1.0)
+    st = rec.stop()
+    deck.stop()
+    assert st.frames >= 10 and (st.width, st.height) == (160, 160) and not st.error
+    with open(tmp_path / "frames" / "meta.csv", newline="") as f:
+        ids = [int(r["deck_id"]) for r in csv.DictReader(f)]
+    assert ids[:3] == [0, 1, 2]
+
+
+def test_aideck_defaults_from_environment(monkeypatch):
+    monkeypatch.delenv("AGRI_AIDECK_PROTO", raising=False)
+    monkeypatch.delenv("AGRI_AIDECK_IP", raising=False)
+    assert default_protocol() == "bitcraze" and default_host("bitcraze") == "192.168.4.1"
+    assert default_host("nanocockpit") == "aideck.local"
+    monkeypatch.setenv("AGRI_AIDECK_PROTO", "NanoCockpit")
+    monkeypatch.setenv("AGRI_AIDECK_IP", "192.168.1.37")
+    assert default_protocol() == "nanocockpit" and default_host("nanocockpit") == "192.168.1.37"
+    monkeypatch.setenv("AGRI_AIDECK_PROTO", "tello")
+    with pytest.raises(ValueError):
+        default_protocol()
 
 
 def _sim_run(tmp_path, n_passes=2, link_fail_at_s=None, vbat0=4.15):

@@ -3,22 +3,23 @@
 The Pi runs everything in the loop: it flies the Crazyflie over the Crazyradio, records the AI deck camera, runs the gateway and talks to the Arduino panel. A laptop or phone is only used to log in over SSH.
 
 ```
-Crazyflie --Crazyradio (USB)----> Pi: drone code (cflib, passes, safety)
-          --AI deck Wi-Fi (wlan0)-> Pi: camera recorder
-                                    Pi: gateway --UDP (eth0, router)--> Arduino panel
-Operator --SSH (eth0, router)-----> Pi
+Crazyflie --Crazyradio (USB)-----------> Pi: drone code (cflib, passes, safety)
+AI deck   --router Wi-Fi (TCP 5000)----> Pi: camera recorder
+                                         Pi: gateway --UDP (router Wi-Fi)--> Arduino panel
+Operator  --SSH (router Wi-Fi)---------> Pi
 ```
 
 Why this layout:
 - One clock for everything: drone log, camera frames, beacons and gateway events all carry the Pi's time, so latencies and frame positions line up without clock sync.
-- The Pi has one Wi-Fi radio, and the camera needs it on the AI deck's own access point. The router (Arduino, SSH) therefore comes in over the Ethernet cable.
+- The AI deck joins the group router as a normal Wi-Fi client, like the Pi and the Arduino. The Pi's single Wi-Fi radio then reaches all of them, and no second network or route rules are needed.
 
 ## What you need
 
-- Raspberry Pi 4 with Ubuntu Server 24.04 (already set up by Anton), on the group router by Ethernet cable.
+- Raspberry Pi 4 with Ubuntu Server 24.04 (already set up by Anton), on the group router's Wi-Fi.
 - The Crazyradio 2.0 in a Pi USB port.
-- The Crazyflie E7E7E7E715 with the Lighthouse deck and the AI deck (Wi-Fi streamer in access point mode, "WiFi streaming example").
+- The Crazyflie E7E7E7E715 with the Lighthouse deck and the AI deck running the NanoCockpit streamer (ESP32 built with the router SSID and password in menuconfig, flashed over JTAG). It names itself `aideck.local`.
 - A machine to log in from, on the router's network.
+- Internet for step 1 only: the router has none, so plug in a phone by USB tethering while installing.
 
 ## Step 0: code on GitHub
 
@@ -37,7 +38,7 @@ git switch drone/position-control
 bash scripts/pi/setup_pi.sh
 ```
 
-It installs `python3-venv`, `tmux` and `libusb`, adds the udev rule for the Crazyradio (`scripts/pi/99-bitcraze.rules`), adds you to the `plugdev` group, creates the Python environment `~/agri_venv` from `requirements-pi.txt`, sets `AGRI_CF_URI` in `~/.bashrc`, and runs the tests.
+It installs `python3-venv`, `tmux`, `libusb` and the mDNS tools (`avahi`, `libnss-mdns`), adds the udev rule for the Crazyradio (`scripts/pi/99-bitcraze.rules`), adds you to the `plugdev` group, creates the Python environment `~/agri_venv` from `requirements-pi.txt`, sets `AGRI_CF_URI` and `AGRI_AIDECK_PROTO=nanocockpit` in `~/.bashrc`, and runs the tests.
 
 - Log out and back in once afterwards (the group change only applies to new logins).
 - Check: `groups` lists `plugdev`, and `python -c "import cflib, cv2"` gives no error.
@@ -53,34 +54,19 @@ python -m agri_loop.drone.c1_preflight
 - Check: it reads the battery voltage, lists the Lighthouse and AI decks, and reports Lighthouse positioning with 2 or more base stations.
 - If it cannot find or open the radio: replug it, check `lsusb` shows `1915:7777`, and check you logged in again after step 1.
 
-## Step 3: network for the camera
+## Step 3: camera on the router Wi-Fi
 
-Do this with the Ethernet cable plugged in and working, so you keep SSH access.
-
-1. Find the Pi's Ethernet address on the router (`ip -4 addr show eth0`) and reserve it in the router's DHCP settings. Do the same for the Arduino.
-2. Back up the current network file and install the new one:
+Power-cycle the drone and give the AI deck about 10 s to join the router. Then:
 
 ```
-sudo cp /etc/netplan/50-cloud-init.yaml ~/50-cloud-init.yaml.bak
-sudo cp scripts/pi/netplan-agri.yaml /etc/netplan/50-cloud-init.yaml
-sudo chmod 600 /etc/netplan/50-cloud-init.yaml
-sudo netplan try
+avahi-resolve -n aideck.local
+python -m agri_loop.drone.c1_preflight --stream 10 --no-radio
 ```
 
-- `netplan try` rolls back by itself after 120 s unless you press Enter, so a mistake cannot lock you out.
-- Use the file name that is actually in `/etc/netplan/`. If there are several files, any other `wlan0` entry must go, or the Pi may join the old Wi-Fi instead of the AI deck.
-- If the AI deck network has a password, add it as `"WiFi streaming example": {password: "..."}`.
-3. Power-cycle the drone, wait for the AI deck network, then check:
-
-```
-ip -4 addr show wlan0      # an address 192.168.4.x
-ip route                   # default route via eth0, not wlan0
-python -m agri_loop.drone.c1_preflight --stream 10
-```
-
-- Check: the stream test reports 5 fps or more (14 fps on 20 Oct).
-
-No Ethernet port on the router: use a USB Wi-Fi adapter for the router (`wlan1`) and keep `wlan0` for the AI deck, with the same no-default-route rule.
+- Check: the first line prints the deck's address, and the stream test reports 5 fps or more with 160 by 160 frames.
+- The recorder reads `AGRI_AIDECK_PROTO` (set to `nanocockpit` by step 1) and connects to `aideck.local`. Every command below picks these up, so no `--aideck-ip` is needed.
+- If the name does not resolve, set the address by hand for this login: `export AGRI_AIDECK_IP=<address>`. Without access to the router page the address can change after a router restart, so check it again with `avahi-resolve` each lab session.
+- The old Bitcraze streamer still works with `--aideck-proto bitcraze` (or `AGRI_AIDECK_PROTO=bitcraze`).
 
 ## Step 4: first flight from the Pi
 
@@ -112,7 +98,7 @@ python -m agri_loop.link.c4_report data/c4_pi/gateway.jsonl data/c4_pi/panel.jso
 
 ## Step 6: real Arduino panel
 
-When the Arduino sketch is ready (listens on UDP 5002, sends PanelState to the Pi's Ethernet address on UDP 5001):
+When the Arduino sketch is ready (listens on UDP 5002, sends PanelState to the Pi's Wi-Fi address on UDP 5001):
 
 ```
 bash scripts/pi/c6lite.sh data/c4_real <Arduino address>

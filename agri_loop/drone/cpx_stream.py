@@ -1,6 +1,8 @@
 """AI deck 1.1 image stream over Wi-Fi (CPX on TCP), recorded to disk.
 
-Wire format, as sent by the Bitcraze wifi-img-streamer example
+Two streamer firmwares are supported, chosen with `protocol`.
+
+"bitcraze": the Bitcraze wifi-img-streamer example
 (aideck-gap8-examples, examples/other/wifi-img-streamer):
 
     every CPX packet:  uint16 length, uint8 routing, uint8 function   (little endian)
@@ -14,9 +16,25 @@ Width and height are read from the header, never assumed: 324x244 (QVGA build)
 and 324x324 (native build) both occur. The AI deck 1.1 camera (HM01B0) is
 monochrome, so raw frames are saved as 8-bit grey unless debayer=True.
 
+"nanocockpit": the IDSIA NanoCockpit streamer (github.com/idsia-robotics/nanocockpit,
+src/gap/examples/streamer with the src/nina ESP32 firmware), checked against its
+source on 2026-11-05 (tcp.py, streamer.py, streamer.h, uart_protocol.h):
+
+    every CPX packet:  uint16 length (payload only), uint8 routing, uint8 function|version
+                       then length payload bytes; function 0x06 is the streamer
+    BUFFER_BEGIN:      uint8 0x10, uint8 type (0x01 image), uint32 size, uint32 crc32
+                       (0 = none), 2 pad bytes, then the first part of the buffer
+    BUFFER_DATA:       uint8 0x11, 3 pad bytes, then the next part of the buffer
+    image buffer:      148-byte metadata (version 10: width, height, bpp, format,
+                       frame id, GAP8 timestamp, forwarded drone state, ...) then pixels
+
+The last part is padded to a multiple of 4 bytes, so only `size` bytes are kept.
+The deck names itself aideck.local over mDNS (160x160 grey frames, 30 fps requested).
+
 Output (hand-off format agreed with the C5 vision pipeline):
     <out_dir>/index.csv   idx,t,file        t = host epoch seconds at frame header
-    <out_dir>/meta.csv    idx,t,t_done,width,height,depth,format,bytes
+    <out_dir>/meta.csv    idx,t,t_done,width,height,depth,format,bytes,deck_id,deck_t_us
+                          (deck_id and deck_t_us are -1 for the Bitcraze streamer)
     <out_dir>/000000.png ...
 """
 from __future__ import annotations
@@ -28,6 +46,7 @@ import socket
 import struct
 import threading
 import time
+import zlib
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
@@ -39,8 +58,39 @@ IMG_HDR = struct.Struct("<BHHBBI")
 IMG_MAGIC = 0xBC
 FMT_RAW = 0
 FMT_JPEG = 1
-DEFAULT_IP = "192.168.4.1"   # AI deck in access point mode
+DEFAULT_IP = "192.168.4.1"   # Bitcraze streamer in access point mode
 DEFAULT_PORT = 5000
+PROTO_BITCRAZE = "bitcraze"
+PROTO_NANOCOCKPIT = "nanocockpit"
+PROTOCOLS = (PROTO_BITCRAZE, PROTO_NANOCOCKPIT)
+NC_HOST = "aideck.local"     # NanoCockpit ESP32 mDNS name (menuconfig MDNS_HOSTNAME)
+
+NC_CPX_HDR = struct.Struct("<HBB")
+NC_F_STREAMER = 0x06
+NC_CMD_BEGIN, NC_CMD_DATA = 0x10, 0x11
+NC_TYPE_IMAGE = 0x01
+NC_BEGIN = struct.Struct("<BBII2x")
+NC_DATA = struct.Struct("<B3x")
+NC_META = struct.Struct("<BHHBBBII")   # first 16 bytes of streamer_metadata_t
+NC_META_SIZE = 148
+NC_META_VERSION = 10
+NC_MTU = 4088                          # 4092-byte packets minus the 4-byte header
+
+
+def default_protocol() -> str:
+    """AGRI_AIDECK_PROTO picks the streamer firmware without editing code (default bitcraze)."""
+    proto = os.environ.get("AGRI_AIDECK_PROTO", PROTO_BITCRAZE).strip().lower()
+    if proto not in PROTOCOLS:
+        raise ValueError(f"AGRI_AIDECK_PROTO={proto!r}, expected one of {', '.join(PROTOCOLS)}")
+    return proto
+
+
+def default_host(protocol: str) -> str:
+    """AGRI_AIDECK_IP if set, else the usual address for that firmware."""
+    env = os.environ.get("AGRI_AIDECK_IP", "").strip()
+    if env:
+        return env
+    return NC_HOST if protocol == PROTO_NANOCOCKPIT else DEFAULT_IP
 
 
 @dataclass
@@ -52,6 +102,8 @@ class Frame:
     depth: int
     fmt: int
     data: bytes
+    deck_id: int = -1     # NanoCockpit: camera hardware frame counter (wraps at 256)
+    deck_t_us: int = -1   # NanoCockpit: GAP8 end-of-frame time, microseconds
 
 
 def read_frame(rx: Callable[[int], bytes], clock: Callable[[], float] = time.time) -> Frame:
@@ -68,6 +120,48 @@ def read_frame(rx: Callable[[int], bytes], clock: Callable[[], float] = time.tim
             length, _dst, _src = CPX_HDR.unpack(rx(CPX_HDR.size))
             buf.extend(rx(length - 2))
         return Frame(t, clock(), width, height, depth, fmt, bytes(buf[:size]))
+
+
+def read_frame_nanocockpit(rx: Callable[[int], bytes], clock: Callable[[], float] = time.time) -> Frame:
+    """Read NanoCockpit streamer packets until one complete image is assembled."""
+    buf: Optional[bytearray] = None
+    remaining, crc, t = 0, 0, 0.0
+    while True:
+        length, _routing, function = NC_CPX_HDR.unpack(rx(NC_CPX_HDR.size))
+        if length > NC_MTU:
+            raise ValueError(f"CPX length {length} is over {NC_MTU}: stream out of step")
+        payload = rx(length)
+        if (function & 0x3F) != NC_F_STREAMER or not payload:
+            continue
+        if payload[0] == NC_CMD_BEGIN and len(payload) >= NC_BEGIN.size:
+            _cmd, kind, size, crc = NC_BEGIN.unpack_from(payload)
+            if kind != NC_TYPE_IMAGE:
+                buf = None
+                continue
+            t, buf, remaining = clock(), bytearray(), size
+            body = payload[NC_BEGIN.size:]
+        elif payload[0] == NC_CMD_DATA and buf is not None:
+            body = payload[NC_DATA.size:]
+        else:
+            buf = None  # out of sequence: wait for the next BUFFER_BEGIN
+            continue
+        take = min(len(body), remaining)
+        buf += body[:take]
+        remaining -= take
+        if remaining:
+            continue
+        data, buf = bytes(buf), None
+        if crc and zlib.crc32(data) != crc:
+            continue  # corrupted buffer: dropped, as the NanoCockpit client does
+        if len(data) < NC_META_SIZE:
+            continue
+        version, width, height, bpp, fmt, frame_id, t_us, _t_state = NC_META.unpack_from(data)
+        if version != NC_META_VERSION:
+            raise ValueError(f"NanoCockpit metadata v{version}, this reader knows v{NC_META_VERSION}")
+        if bpp != 1 or fmt != 0:
+            raise ValueError(f"NanoCockpit frame format {fmt} with {bpp} bytes per pixel, expected 8-bit grey")
+        pixels = data[NC_META_SIZE:NC_META_SIZE + width * height]
+        return Frame(t, clock(), width, height, 1, FMT_RAW, pixels, deck_id=frame_id, deck_t_us=t_us)
 
 
 def decode_frame(fr: Frame, debayer: bool = False, flip: str = "none") -> np.ndarray:
@@ -133,7 +227,11 @@ class FrameRecorder:
 
     def __init__(self, out_dir: str, ip: str = DEFAULT_IP, port: int = DEFAULT_PORT,
                  debayer: bool = False, save: bool = True, timeout_s: float = 5.0, flip: str = "none",
-                 retry_s: float = 1.0) -> None:
+                 retry_s: float = 1.0, protocol: str = PROTO_BITCRAZE) -> None:
+        if protocol not in PROTOCOLS:
+            raise ValueError(f"unknown AI deck protocol {protocol!r}")
+        self.protocol = protocol
+        self._read = read_frame_nanocockpit if protocol == PROTO_NANOCOCKPIT else read_frame
         self.out_dir = out_dir
         self.ip, self.port = ip, port
         self.debayer, self.save, self.timeout_s, self.flip = debayer, save, timeout_s, flip
@@ -184,7 +282,7 @@ class FrameRecorder:
                 self.connected.set()
                 rx = socket_rx(self._sock)
                 while not self._stop.is_set():
-                    fr = read_frame(rx)
+                    fr = self._read(rx)
                     st = self.stats
                     if st.t_first is None:
                         st.t_first = fr.t
@@ -220,7 +318,8 @@ class FrameRecorder:
                 open(os.path.join(self.out_dir, "meta.csv"), "w", newline="") as fm:
             wi, wm = csv.writer(fi), csv.writer(fm)
             wi.writerow(["idx", "t", "file"])
-            wm.writerow(["idx", "t", "t_done", "width", "height", "depth", "format", "bytes"])
+            wm.writerow(["idx", "t", "t_done", "width", "height", "depth", "format", "bytes",
+                         "deck_id", "deck_t_us"])
             while True:
                 item = self._q.get()
                 if item is None:
@@ -234,7 +333,8 @@ class FrameRecorder:
                         self.stats.decode_errors += 1
                         continue
                 wi.writerow([idx, f"{fr.t:.6f}", name])
-                wm.writerow([idx, f"{fr.t:.6f}", f"{fr.t_done:.6f}", fr.width, fr.height, fr.depth, fr.fmt, len(fr.data)])
+                wm.writerow([idx, f"{fr.t:.6f}", f"{fr.t_done:.6f}", fr.width, fr.height, fr.depth, fr.fmt, len(fr.data),
+                             fr.deck_id, fr.deck_t_us])
 
 
 def encode_packets(img: np.ndarray, fmt: int = FMT_RAW, chunk: int = 1020) -> bytes:
@@ -251,4 +351,26 @@ def encode_packets(img: np.ndarray, fmt: int = FMT_RAW, chunk: int = 1020) -> by
     for i in range(0, len(data), chunk):
         part = data[i:i + chunk]
         out += CPX_HDR.pack(len(part) + 2, 0x09, 0x00) + part
+    return bytes(out)
+
+
+def encode_nanocockpit_packets(img: np.ndarray, frame_id: int = 0, t_us: int = 0, checksum: bool = False,
+                               mtu: int = NC_MTU) -> bytes:
+    """Build the NanoCockpit CPX byte stream for one grey frame, padded like the GAP8 does."""
+    h, w = img.shape[:2]
+    meta = bytearray(NC_META_SIZE)
+    NC_META.pack_into(meta, 0, NC_META_VERSION, w, h, 1, 0, frame_id & 0xFF, t_us & 0xFFFFFFFF, 0)
+    data = bytes(meta) + np.ascontiguousarray(img, dtype=np.uint8).tobytes()
+    crc = (zlib.crc32(data) or 0xFFFFFFFF) if checksum else 0
+    routing = 0x03 | (0x04 << 3) | (1 << 6)      # to the Wi-Fi host, from the GAP8, last packet
+    out = bytearray()
+    pos = 0
+    while pos < len(data):
+        head = NC_BEGIN.pack(NC_CMD_BEGIN, NC_TYPE_IMAGE, len(data), crc) if pos == 0 else NC_DATA.pack(NC_CMD_DATA)
+        part = data[pos:pos + mtu - len(head)]
+        pos += len(part)
+        if pos >= len(data) and len(part) % 4:
+            part += bytes(4 - len(part) % 4)
+        body = head + part
+        out += NC_CPX_HDR.pack(len(body), routing, NC_F_STREAMER) + body
     return bytes(out)
