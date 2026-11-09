@@ -134,6 +134,16 @@ def test_aideck_defaults_from_environment(monkeypatch):
         default_protocol()
 
 
+def test_flightlog_ignores_samples_after_close(tmp_path):
+    """A radio log packet can still arrive while the link shuts down (seen on the Pi, 9 Nov)."""
+    log = FlightLogger(str(tmp_path / "flight_log.csv"))
+    log.add_fast(1.0, 10, {"x": 0.1})
+    log.close()
+    log.add_fast(2.0, 20, {"x": 0.2})   # must not raise
+    log.close()                          # closing twice is harmless
+    assert log.rows == 1
+
+
 def _sim_run(tmp_path, n_passes=2, link_fail_at_s=None, vbat0=4.15):
     run = tmp_path / "run"
     (run / "frames").mkdir(parents=True)

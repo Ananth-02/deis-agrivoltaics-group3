@@ -128,9 +128,9 @@ def main(argv=None) -> int:
             deck.stop()
         if beacon is not None:
             beacon.stop(os.path.join(run_dir, "drone.jsonl"))
+        vehicle.close()   # stop the radio log first, so no sample arrives after the log file is closed
         logger.close()
         events.save(os.path.join(run_dir, "events.jsonl"))
-        vehicle.close()
 
     crit = C1Criteria(n_passes=a.passes, fps_min=a.fps_min)
     run = analyse_run(run_dir, crit)

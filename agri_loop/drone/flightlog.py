@@ -47,6 +47,8 @@ class FlightLogger:
 
     def add_fast(self, t: float, t_cf_ms: Optional[int], values: Dict[str, Any]) -> None:
         with self._lock:
+            if self._f.closed:
+                return  # a log packet that arrived while the radio link was shutting down
             row = dict(self._slow)
             row.update(values)
             row["t"] = t
@@ -59,8 +61,9 @@ class FlightLogger:
 
     def close(self) -> None:
         with self._lock:
-            self._f.flush()
-            self._f.close()
+            if not self._f.closed:
+                self._f.flush()
+                self._f.close()
 
 
 def _fmt(v: Any) -> str:
