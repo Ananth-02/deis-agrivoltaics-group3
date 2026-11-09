@@ -33,7 +33,9 @@ grep -q "AGRI_AIDECK_PROTO" "$HOME/.bashrc" || echo "export AGRI_AIDECK_PROTO=\"
 grep -q "$VENV/bin/activate" "$HOME/.bashrc" || echo "source \"$VENV/bin/activate\"" >> "$HOME/.bashrc"
 
 echo "== Tests"
-(cd "$REPO" && "$VENV/bin/python" -m pytest -q)
+# With ROS2 sourced, pytest would auto-load ROS2's launch_testing plugin, which needs packages
+# that are not in this environment. Our tests use no plugins, so autoloading is switched off.
+(cd "$REPO" && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "$VENV/bin/python" -m pytest -q)
 
 echo
 echo "Done. Log out and back in once (the plugdev group only applies to new logins),"
