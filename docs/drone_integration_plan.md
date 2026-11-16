@@ -101,7 +101,7 @@ The agreed state machine, with one-time actions on entering a state and `tick` o
 | FLY_OVER | `Goto OVER_PLANT` | panel lost -> ABORT; near(OVER_PLANT) for 0.5 s -> CAPTURE; 10 s -> ABORT |
 | CAPTURE | `start,n` on `/group3/capture` | panel lost -> ABORT; 3 s -> send `stop,n`, RETURN |
 | RETURN | `Goto STAGING` | near(STAGING) -> RESTORE_PANEL; 10 s -> ABORT |
-| RESTORE_PANEL | panel `Done` | panel confirms 45 deg -> LAND; 5 s -> warn and LAND anyway (drone is already clear) |
+| RESTORE_PANEL | panel `Done` | panel reports `SUN_CATCH,45` -> LAND; 5 s -> warn and LAND anyway (drone is already clear) |
 | LAND | `Goto HOME`, then `Land` once near HOME | state `LANDED` -> IDLE |
 | ABORT | `Goto STAGING`, hover | human: `land` -> LAND, `retry` -> WAIT_CLEAR |
 
@@ -179,14 +179,15 @@ Pass: `ros2 topic hz` shows about 20 Hz; with the real drone the pose follows it
 
 ## 6. To measure in the room (before step 3)
 
-All in the Lighthouse frame: put the drone at the point, read `x, y, z` from `python -m agri_loop.drone.c1_preflight` or from `ros2 topic echo /group3/cf/pose` once step 1 works.
+All in the Lighthouse frame. Use `python -m agri_loop.drone.measure_points --arduino <Arduino IP>` (in `~/agri_venv`, with cf_server, arduino_bridge and mission_coordinator stopped): it lists 15 points in walking order, records each one by itself once the drone has been still for 2.5 s at a new place (the drone's LEDs flash), moves the panel for the panel points, and writes `points.csv` and `summary.md` (fence, heights, HOME, STAGING, OVER_PLANT, keep-out box, warnings) to `data/measure/<time>/`. `--start <point>` redoes a part.
 
 - HOME: the take-off pad.
 - STAGING: beside the plant, outside the panel's swing in every position (handoff example: 0.6 m to the side, 0.8 m up).
 - OVER_PLANT: above the pot centre.
 - Panel keep-out box: footprint of the panel swing plus 0.15 m, and the height of the panel's top edge when vertical (`Plant_inspection`). OVER_PLANT must be at least 0.3 m above that edge, or the drone hits the panel it asked to move.
 - Camera footprint at the chosen height (160x160 frames) to check the whole pot is in view.
-- The panel's state name and angle after `Done` (check `panel.ino`), so RESTORE_PANEL knows what confirmation to wait for.
+
+Panel facts read from Anton's `panel.ino` (16 Nov): states `SUN_CATCH` (servo 45, after `Done` and after every Arduino reset), `PLANT_INSPECTION` (0), `PANEL_INSPECTION` (90); the reply angle is the servo angle the sketch has commanded, moved 1 deg per loop with a 15 ms delay.
 
 ## 7. Requirements and how each is shown
 
@@ -204,6 +205,14 @@ All in the Lighthouse frame: put the drone at the point, read `x, y, z` from `py
 - **Shared Wi-Fi** carries the panel and camera. The radio link and Lighthouse do not use it, so a Wi-Fi drop cannot crash the drone, but it can delay panel confirmation (ABORT then handles it).
 - **One radio user.** `cfclient` cannot run while `cf_server` holds the Crazyradio.
 - **SSH drops.** Run every node in `tmux`, as for the C1 flights.
+- **Arduino reset during a mission.** After any reset (for example a brownout when the servo draws current) `panel.ino` starts in `SUN_CATCH` and writes servo 45 straight away, at full servo speed, before Wi-Fi is back. The coordinator only notices once replies resume (ABORT). This is why OVER_PLANT must sit above the panel's highest point in every position (the vertical top edge plus 0.3 m): then a panel moving on its own spoils the photo but cannot reach the drone. Check that the servo supply cannot pull down the Arduino's supply.
+- **Arduino Wi-Fi drop.** `panel.ino` connects only in `setup()`, so after a Wi-Fi drop it stays silent until reset. Safe (the coordinator times out and aborts) but it stops a test session; a reconnect check in `loop()` would fix it.
+
+### Suggestions for Anton's nodes (small, optional)
+
+- `arduino_bridge` sends and then reads in the same 5 Hz tick, so each Arduino reply waits about 0.2 s in the socket before it is published. A separate 50 Hz receive timer (as in `drone_bridge`) makes every panel state 0.2 s fresher and takes about 0.2 s off the NFR-3 latency.
+- The measured 1.50-1.80 s is more than the 0.7 s the sketch comment expects for 45 deg. Likely causes: `udp.parsePacket()` on the UNO R4 goes through the ESP32 module and adds time to every loop, plus up to 0.1 s coordinator tick, 0.2 s command resend wait and 0.2 s reply wait. Moving 2 deg per loop and the receive timer together should bring it to about 1 s.
+- `panel.ino` holds the Wi-Fi password, so it must not be committed to the public repository. Use an `arduino_secrets.h` that git ignores, as the repository already does for `panel_node.ino`.
 
 ## 9. Questions for Anton
 
