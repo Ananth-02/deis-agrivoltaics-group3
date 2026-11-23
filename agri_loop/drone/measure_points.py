@@ -65,6 +65,7 @@ WINDOW_S = 2.5      # how long the drone must be still
 STILL_M = 0.015     # max distance of any sample from the window mean
 MIN_MOVE_M = 0.08   # a new point must be this far from the last recorded one
 FRESH_S = 0.3
+STALE_RESET_S = 1.0  # unusable samples for longer than this restart the stillness window
 CLEARANCE_M = 0.30  # flight height above the highest obstacle
 KEEP_OUT_MARGIN_M = 0.15
 FENCE_MARGIN_M = 0.20
@@ -240,11 +241,17 @@ def _key() -> str:
     return line.strip().lower() or "enter"
 
 
-def _fresh(s: Dict[str, Any], now: float) -> bool:
-    if "x" not in s or now - s.get("t", 0.0) > FRESH_S:
-        return False
+def not_ready(s: Dict[str, Any], now: float) -> str:
+    """Why this sample cannot be used ('' when it can), so the waiting message says what is wrong."""
+    if "x" not in s:
+        return "no position from the drone yet"
+    age = now - s.get("t", 0.0)
+    if age > FRESH_S:
+        return f"newest position is {age * 1000:.0f} ms old (radio)"
     lh = s.get("lh_status")
-    return lh is None or lh == LH_TO_ESTIMATOR
+    if lh is not None and int(lh) != LH_TO_ESTIMATOR:
+        return f"lighthouse.status={lh}, base stations={bin(int(s.get('lh_active') or 0)).count('1')}"
+    return ""
 
 
 def write_results(run_dir: str, points: Dict[str, Dict[str, Any]]) -> str:
@@ -296,6 +303,7 @@ def main(argv=None) -> int:
     idx = next((i for i, p in enumerate(POINTS) if p[0] == a.start), 0)
     entered = -1
     t_status = 0.0
+    bad_since: Optional[float] = None
     try:
         while idx < len(POINTS):
             key, what, cmd = POINTS[idx]
@@ -311,13 +319,19 @@ def main(argv=None) -> int:
                 entered = idx
             now = time.time()
             s = vehicle.latest()
-            if _fresh(s, now):
+            why = not_ready(s, now)
+            if not why:
                 det.add(now, (s["x"], s["y"], s["z"]))
+                bad_since = None
             else:
-                det.reset()
-                if now - t_status > 2.0:
-                    print("  waiting for a fresh Lighthouse position (keep the deck uncovered, in view of the base stations)")
-                    t_status = now
+                # Short blips are normal over the radio; only a gap longer than STALE_RESET_S
+                # throws the stillness window away (before, one blip restarted it every time).
+                bad_since = bad_since or now
+                if now - bad_since > STALE_RESET_S:
+                    det.reset()
+                    if now - t_status > 2.0:
+                        print(f"  waiting: {why} (keep the deck uncovered, in view of the base stations)")
+                        t_status = now
             k = _key()
             if k == "q":
                 break

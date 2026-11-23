@@ -88,3 +88,14 @@ def test_panel_link_waits_for_confirmation():
     link.close()
     ard.close()
     assert ok and reply == "PLANT_INSPECTION,0"
+
+
+def test_not_ready_names_the_reason():
+    from agri_loop.drone.measure_points import not_ready
+
+    now = 100.0
+    ok = dict(x=0.0, y=0.0, z=0.0, t=now - 0.05, lh_status=2, lh_active=13)
+    assert not_ready(ok, now) == ""
+    assert not_ready({}, now).startswith("no position")
+    assert "ms old" in not_ready(dict(ok, t=now - 0.5), now)
+    assert "base stations=1" in not_ready(dict(ok, lh_status=1, lh_active=1), now)
