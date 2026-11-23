@@ -62,9 +62,9 @@ PANEL_REPLY = {"Plant_inspection": ("PLANT_INSPECTION", 0), "Panel_inspection": 
 FLOOR_POINTS = ("origin", "towards_strip", "takeoff", "corner_strip", "staging", "corner_rig")
 
 WINDOW_S = 2.5      # how long the drone must be still
-STILL_M = 0.015     # max distance of any sample from the window mean
+STILL_M = 0.03      # max distance of any sample from the window mean (Lighthouse noise on the floor is about 1.5 cm)
 MIN_MOVE_M = 0.08   # a new point must be this far from the last recorded one
-FRESH_S = 0.3
+FRESH_S = 2.0       # the drone stands still, so delay does not matter here; only a stopped stream does
 STALE_RESET_S = 1.0  # unusable samples for longer than this restart the stillness window
 CLEARANCE_M = 0.30  # flight height above the highest obstacle
 KEEP_OUT_MARGIN_M = 0.15
@@ -323,6 +323,14 @@ def main(argv=None) -> int:
             if not why:
                 det.add(now, (s["x"], s["y"], s["z"]))
                 bad_since = None
+                if now - t_status > 2.0 and det.buf:
+                    span = det.buf[-1][0] - det.buf[0][0]
+                    moved = _dist(det.mean(), det.last) if det.last else float("inf")
+                    print(f"  at x={s['x']:.2f} y={s['y']:.2f} z={s['z']:.2f}: still for {span:.1f}/{WINDOW_S} s, "
+                          f"spread {det.spread() * 100:.1f} cm (max {STILL_M * 100:.0f})"
+                          + (f", only {moved * 100:.0f} cm from the last point (min {MIN_MOVE_M * 100:.0f})"
+                             if moved < MIN_MOVE_M else ""))
+                    t_status = now
             else:
                 # Short blips are normal over the radio; only a gap longer than STALE_RESET_S
                 # throws the stillness window away (before, one blip restarted it every time).
