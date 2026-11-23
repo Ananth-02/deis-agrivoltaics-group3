@@ -206,8 +206,52 @@ class PanelLink:
             time.sleep(0.2)
         return False, reply
 
+    def ping(self, timeout_s: float = 2.0) -> str:
+        """Send Status (changes nothing) and return the Arduino's reply, or '' if it does not answer."""
+        t_end = time.time() + timeout_s
+        while time.time() < t_end:
+            self.sock.sendto(b"Status", self.addr)
+            try:
+                return self.sock.recvfrom(64)[0].decode(errors="replace").strip()
+            except (socket.timeout, ConnectionResetError):
+                continue
+        return ""
+
     def close(self) -> None:
         self.sock.close()
+
+
+def other_panel_senders() -> List[str]:
+    """ROS nodes that also send panel commands and would undo ours (Linux only; [] elsewhere)."""
+    import subprocess
+
+    found = []
+    for name in ("arduino_bridge", "mission_coordinator"):
+        try:
+            if subprocess.run(["pgrep", "-f", name], capture_output=True).returncode == 0:
+                found.append(name)
+        except OSError:
+            pass
+    return found
+
+
+def check_panel(panel: Optional["PanelLink"], ip: str) -> None:
+    """Say at the start, loudly, whether the panel points will move the panel by themselves."""
+    print("\n== Panel ==")
+    if panel is None:
+        print("  NO Arduino address: the panel will NOT move by itself. Stop (q), then either run\n"
+              "  'source ~/.bashrc' in this window (sets AGRI_ARDUINO_IP) or pass --arduino <IP>.")
+        return
+    reply = panel.ping()
+    if reply:
+        print(f"  Arduino at {ip} answers: {reply}")
+    else:
+        print(f"  Arduino at {ip} does NOT answer: check its IP in the Serial Monitor, that it is on the Wi-Fi\n"
+              f"  (press its reset button), and 'ping {ip}'. The panel points will not move the panel.")
+    busy = other_panel_senders()
+    if busy:
+        print(f"  Running: {', '.join(busy)}. arduino_bridge resends its last command 5 times a second and\n"
+              "  undoes the script's commands: stop it (Ctrl+C in its window) before the panel points.")
 
 
 def _blink(vehicle: Any) -> None:
@@ -283,6 +327,9 @@ def main(argv=None) -> int:
     ap.add_argument("--arduino", default=os.environ.get("AGRI_ARDUINO_IP", ""), metavar="IP",
                     help="panel Arduino address; without it, set the panel by hand when asked")
     ap.add_argument("--start", default="", help="start at this point name (to redo a part)")
+    ap.add_argument("--manual", action="store_true",
+                    help="record only on Enter (for example from a phone over SSH), never automatically; "
+                         "auto-recording can fire while you stand still on the way to a point")
     ap.add_argument("--out", default=os.path.join("data", "measure"))
     a = ap.parse_args(argv)
 
@@ -298,6 +345,7 @@ def main(argv=None) -> int:
         vehicle.start_logging()
         time.sleep(1.5)
     panel = PanelLink(a.arduino) if a.arduino else None
+    check_panel(panel, a.arduino)
     det = StillDetector()
     points: Dict[str, Dict[str, Any]] = {}
     idx = next((i for i, p in enumerate(POINTS) if p[0] == a.start), 0)
@@ -312,9 +360,16 @@ def main(argv=None) -> int:
                 if cmd and panel:
                     ok, reply = panel.set(cmd)
                     print(f"  panel {cmd}: {'confirmed' if ok else 'NOT confirmed'} ({reply or 'no reply'})")
+                    if not ok:
+                        print("  The panel is not in position. Stop arduino_bridge if it runs, then press b and\n"
+                              "  Enter to come back here and try again (do not move the panel by hand: it\n"
+                              "  forces the servo's gears).")
                 elif cmd:
                     print(f"  (no --arduino: put the panel in position yourself for this point)")
-                print("  Keep the drone still for 2.5 s; the LEDs flash when it is recorded.")
+                if a.manual:
+                    print("  Hold the drone still there, then press Enter to record (s = skip, b = back).")
+                else:
+                    print("  Keep the drone still for 2.5 s; the LEDs flash when it is recorded.")
                 det.reset()
                 entered = idx
             now = time.time()
@@ -353,10 +408,14 @@ def main(argv=None) -> int:
                 det.last = None
                 entered = -1
                 continue
-            pos = det.check()
+            pos = None if a.manual else det.check()
             how = "auto"
-            if pos is None and k == "enter" and det.mean() is not None:
-                pos, how = det.mean(), "enter"
+            if pos is None and k == "enter":
+                if a.manual and (len(det.buf) < 10 or det.spread() > STILL_M):
+                    print(f"  not recorded: hold still a moment longer (spread {det.spread() * 100:.1f} cm, "
+                          f"{len(det.buf)} samples), then press Enter again")
+                elif det.mean() is not None:
+                    pos, how = det.mean(), "enter"
             if pos is not None:
                 points[key] = dict(pos=[round(c, 4) for c in pos], spread_m=round(det.spread(), 4),
                                    samples=len(det.buf), how=how, t=round(now, 3))

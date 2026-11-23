@@ -99,3 +99,22 @@ def test_not_ready_names_the_reason():
     assert not_ready({}, now).startswith("no position")
     assert "ms old" in not_ready(dict(ok, t=now - 2.5), now)
     assert "base stations=1" in not_ready(dict(ok, lh_status=1, lh_active=1), now)
+
+
+def test_panel_ping_returns_reply_or_empty():
+    ard = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    ard.bind(("127.0.0.1", 0))
+
+    def arduino():
+        data, addr = ard.recvfrom(64)
+        assert data == b"Status"
+        ard.sendto(b"SUN_CATCH,45", addr)
+
+    th = threading.Thread(target=arduino)
+    th.start()
+    link = PanelLink("127.0.0.1", ard.getsockname()[1])
+    assert link.ping() == "SUN_CATCH,45"
+    th.join()
+    ard.close()
+    assert link.ping(timeout_s=0.5) == ""   # nobody listening any more
+    link.close()
