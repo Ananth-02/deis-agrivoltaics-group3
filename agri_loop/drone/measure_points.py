@@ -420,6 +420,8 @@ def main(argv=None) -> int:
                 points[key] = dict(pos=[round(c, 4) for c in pos], spread_m=round(det.spread(), 4),
                                    samples=len(det.buf), how=how, t=round(now, 3))
                 print(f"  recorded {key}: x={pos[0]:.3f} y={pos[1]:.3f} z={pos[2]:.3f} ({how})")
+                write_results(run_dir, points)   # save after every point, so a killed run keeps what it has
+                print(f"  saved {len(points)} point(s) to {run_dir}")
                 _blink(vehicle)
                 print("\a", end="", flush=True)
                 det.accept(pos)
