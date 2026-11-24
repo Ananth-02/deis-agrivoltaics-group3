@@ -50,6 +50,7 @@ class C1Config:
     yaw_gain: float = 1.0          # (deg/s) per deg of heading error
     max_correction_m_s: float = 0.10
     geofence_margin_m: float = 0.5
+    max_z_m: float = 1.3           # absolute z limit of the geofence, whatever the flight height
     min_start_vbat: float = 3.8    # refuse take-off below this (resting voltage)
     land_vbat: float = 3.3         # land if below this for 1 s in flight
     max_tilt_deg: float = 45.0
@@ -111,6 +112,7 @@ class Mission:
         self.ev = events
         self.clock, self.sleep = clock, sleep
         self.home = (0.0, 0.0)
+        self.ground_z = 0.0    # z the estimator reads on the ground at take-off (the floor need not read 0)
         self._low_since: Optional[float] = None
         self.passes_done = 0
         self.airborne = False
@@ -148,7 +150,7 @@ class Mission:
         hx, hy = self.home
         m = c.geofence_margin_m
         x, y, z = self._dir() * (s["x"] - hx), s["y"] - hy, s["z"]   # x: distance along the pass direction
-        if x < -m or x > c.pass_length_m + m or abs(y) > m or z > c.height_m + m:
+        if x < -m or x > c.pass_length_m + m or abs(y) > m or z > min(c.height_m + m, c.max_z_m):
             raise MissionAbort(f"geofence: x={x:.2f} y={y:.2f} z={z:.2f}")
 
     def _send_world(self, s: Dict[str, Any], vx_w: float, vy_w: float, z: float) -> None:
@@ -204,12 +206,13 @@ class Mission:
         if vb is not None and vb < c.min_start_vbat:
             raise MissionAbort(f"battery {vb:.2f} V below {c.min_start_vbat} V, not taking off")
         self.home = (s.get("x", 0.0), s.get("y", 0.0))
+        self.ground_z = float(s.get("z", 0.0) or 0.0)
         self.v.arm(True)
         self.ev.add("armed", self.clock())
         self.sleep(1.0)
         self.ev.add("takeoff", self.clock(), height_m=c.height_m)
         self.airborne = True
-        self._hold(self.home[0], c.height_m, c.takeoff_s, z_from=0.05)
+        self._hold(self.home[0], c.height_m, c.takeoff_s, z_from=self.ground_z + 0.05)
         self._hold(self.home[0], c.height_m, c.settle_s)
         self.ev.add("hover_ok", self.clock(), **{k: self.v.latest().get(k) for k in ("x", "y", "z", "vbat")})
 
@@ -272,9 +275,9 @@ class Mission:
         s = self.v.latest()
         z0 = s.get("z", c.height_m) or c.height_m
         self.ev.add("land", self.clock())
-        self._hold(s.get("x", self.home[0]), 0.05, c.land_s, z_from=z0, critical_only=True)
+        self._hold(s.get("x", self.home[0]), self.ground_z + 0.05, c.land_s, z_from=z0, critical_only=True)
         self.v.stop_motors()
-        self.airborne = False
+        self.airborne = False     # at once: a retry after this point must not take off again
         self.v.arm(False)
         self.ev.add("landed", self.clock())
 
@@ -286,19 +289,21 @@ class Mission:
             for i in range(self.cfg.n_passes):
                 self.fly_pass(i)
             self.land()
-        except MissionAbort as e:
-            result.update(aborted=True, reason=e.reason)
-            self.ev.add("abort", self.clock(), reason=e.reason, cut_motors=e.cut_motors)
-            self._safe_stop(e.cut_motors)
-        except KeyboardInterrupt:
-            result.update(aborted=True, reason="operator Ctrl+C")
-            self.ev.add("abort", self.clock(), reason="operator Ctrl+C", cut_motors=False)
-            self._safe_stop(False)
-        except Exception as e:  # noqa: BLE001 - never close the link while airborne: land first
-            reason = f"unexpected error: {type(e).__name__}: {e}"
-            result.update(aborted=True, reason=reason)
-            self.ev.add("abort", self.clock(), reason=reason, cut_motors=False)
-            self._safe_stop(False)
+        except (MissionAbort, KeyboardInterrupt, Exception) as e:  # noqa: BLE001 - land first, whatever happened
+            saved = _ignore_stop_signals()   # from here until landed, Ctrl+C, SIGTERM and SIGHUP are ignored
+            try:
+                cut = False
+                if isinstance(e, MissionAbort):
+                    reason, cut = e.reason, e.cut_motors
+                elif isinstance(e, KeyboardInterrupt):
+                    reason = "operator Ctrl+C"
+                else:
+                    reason = f"unexpected error: {type(e).__name__}: {e}"
+                result.update(aborted=True, reason=reason)
+                self.ev.add("abort", self.clock(), reason=reason, cut_motors=cut)
+                self._safe_stop(cut)
+            finally:
+                _restore_signals(saved)
         result["passes_done"] = self.passes_done
         self.ev.add("mission_end", self.clock(), **result)
         return result
@@ -307,17 +312,15 @@ class Mission:
         if cut_motors or not self.airborne:
             self.v.emergency_stop() if cut_motors else self.v.stop_motors()
             self.airborne = False
+            try:
+                self.v.arm(False)
+            except Exception:  # noqa: BLE001 - not every vehicle can disarm; the motors are stopped anyway
+                pass
             return
-        old = None
-        try:   # a further Ctrl+C or SIGTERM while landing must not abandon the landing
-            old = signal.signal(signal.SIGINT, signal.SIG_IGN)
-        except (ValueError, OSError):   # not the main thread
-            pass
         try:
-            for _ in range(3):
+            while self.airborne:    # a landing that is interrupted starts again from where the drone is
                 try:
                     self.land()
-                    break
                 except KeyboardInterrupt:
                     continue
         except MissionAbort as e:
@@ -327,6 +330,25 @@ class Mission:
         except Exception:  # noqa: BLE001 - last resort
             self.v.emergency_stop()
             self.airborne = False
-        finally:
-            if old is not None:
-                signal.signal(signal.SIGINT, old)
+
+
+def _ignore_stop_signals() -> Dict[int, Any]:
+    saved: Dict[int, Any] = {}
+    for name in ("SIGINT", "SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            saved[sig] = signal.signal(sig, signal.SIG_IGN)
+        except (ValueError, OSError):   # not the main thread
+            pass
+    return saved
+
+
+def _restore_signals(saved: Dict[int, Any]) -> None:
+    for sig, handler in saved.items():
+        if handler is not None:
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):
+                pass

@@ -39,6 +39,8 @@ ZONE_FALLBACK_M = 0.15  # zone half-size around the pot when the panel points ar
 MAX_TAKEOFF_Y_OFFSET_M = 0.10
 CLEARANCE_M = 0.30      # flight height above the highest part of the rig
 MAX_FLY_Z_M = 1.2       # never fly higher than this (net, base station view)
+MAX_FLOOR_Z_M = 0.10     # the floor must read about 0 in the Lighthouse frame
+GEOFENCE_MARGIN_M = 0.2  # tight mission geofence around the pass line
 SETTLE_S = 3.0          # after landing: let the gateway release the panel
 
 
@@ -72,8 +74,11 @@ def plan(points: Optional[Dict[str, Any]], args: Any) -> Dict[str, Any]:
     speed, lead_s = float(_arg(args, "speed", 0.2)), float(_arg(args, "lead_s", 2.2))
     fp = float(_arg(args, "footprint", FOOTPRINT_M))
     fov = _arg(args, "fov_deg")
+    if fov is not None and not 0 < float(fov) < 180:
+        raise PlanError(f"--fov-deg {fov} must be between 0 and 180")
     fp_note = f"assumed {fp:.2f} m (give --fov-deg to size it from the geometry)"
     passes = int(_arg(args, "passes", 2))
+    home_tol = float(_arg(args, "home_tol", 0.10))
     if not speed > 0:
         raise PlanError("the speed must be above 0")
     if passes < 2 or passes % 2:
@@ -99,6 +104,8 @@ def plan(points: Optional[Dict[str, Any]], args: Any) -> Dict[str, Any]:
 
     # height: --height and over_plant_z are above the floor reading; the drone flies at floor_z + height
     floor = float(derived.get("floor_z") or 0.0)
+    if abs(floor) > MAX_FLOOR_Z_M:
+        raise PlanError(f"the floor reads z = {floor:.2f} m: check the Lighthouse set-up before flying")
     height = _arg(args, "height")
     if height is None:
         height = derived.get("over_plant_z")
@@ -145,11 +152,16 @@ def plan(points: Optional[Dict[str, Any]], args: Any) -> Dict[str, Any]:
         if dist_far <= 0:
             raise PlanError("the zone is not ahead of the take-off spot in this direction: "
                             "check --direction or the take-off point")
+        zx0, zx1, zy0, zy1 = zone[0] - fp, zone[1] + fp, zone[2] - fp, zone[3] + fp
+        if zx0 <= takeoff[0] <= zx1 and zy0 <= takeoff[1] <= zy1:
+            raise PlanError("the take-off spot is inside the zone grown by the camera patch: the climb would go "
+                            "through the rig")
         need = dist_far + end_margin
         fence = (derived.get("fence") or {}).get("x")
         room = None
         if fence:
             room = (fence[1] - takeoff[0]) if direction > 0 else (takeoff[0] - fence[0])
+            room -= home_tol    # the drone may start up to home_tol from the planned spot
         if length is None:
             length = need if room is None else min(need, room)
         length = float(length)
@@ -279,7 +291,7 @@ def build_commands(a: Any, p: Dict[str, Any], run: str, fake: bool) -> Dict[str,
         ["--fake-arduino"] if fake else ["--arduino", a.arduino])
     c1 = [py, "-m", "agri_loop.drone.c1_run", "--sim" if a.sim else "--fly", "--beacon", "127.0.0.1",
           "--height", str(p["fly_z"]), "--length", str(p["length"]), "--speed", str(p["speed"]),
-          "--passes", str(p["passes"]), "--direction", str(p["direction"]), "--fps-min", "5",
+          "--passes", str(p["passes"]), "--geofence-margin", str(GEOFENCE_MARGIN_M), "--direction", str(p["direction"]), "--fps-min", "5",
           "--out", os.path.join(run, "c1")]
     if not a.sim:   # the real flight needs Lighthouse positions, and must start on the planned spot
         c1 += ["--control", "position"]
@@ -289,6 +301,20 @@ def build_commands(a: Any, p: Dict[str, Any], run: str, fake: bool) -> Dict[str,
 
 
 def main(argv=None) -> int:
+    for name in ("SIGTERM", "SIGHUP"):   # a stop request behaves like Ctrl+C, so the helpers are always stopped
+        if hasattr(signal, name):
+            try:
+                signal.signal(getattr(signal, name), signal.default_int_handler)
+            except (ValueError, OSError):
+                pass
+    try:
+        return _main(argv)
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+        return 1
+
+
+def _main(argv=None) -> int:
     a = build_parser().parse_args(argv)
     points = None
     if a.points:
@@ -367,9 +393,9 @@ def run_foreground(cmd: Sequence[str]) -> int:
     old = {}
 
     def forward(signum, frame):  # noqa: ARG001
-        print("\nStop requested: telling c1_run to land the drone ...")
         try:
-            proc.send_signal(signal.SIGINT)
+            proc.send_signal(signal.SIGINT)    # first: nothing before this can fail or block
+            print("\nStop requested: telling c1_run to land the drone ...")
         except (OSError, ValueError):
             pass
     if os.name != "nt":

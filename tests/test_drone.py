@@ -329,3 +329,63 @@ def test_mission_lands_after_an_unexpected_error(tmp_path):
     v.close()
     assert res["aborted"] and "boom" in res["reason"]
     assert any(e["ev"] == "landed" for e in ev.events)
+
+
+class _OffsetSim(SimVehicle):
+    """A floor that reads z = 0.2 m: reports z + 0.2 and takes commands in the same frame."""
+    OFFSET = 0.2
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.cmd_z = []
+
+    def latest(self):
+        s = dict(super().latest())
+        if "z" in s:
+            s["z"] += self.OFFSET
+        return s
+
+    def hover(self, vx, vy, yawrate, z):
+        self.cmd_z.append(z)
+        super().hover(vx, vy, yawrate, z - self.OFFSET)
+
+
+def test_mission_uses_the_ground_reading_for_takeoff_ramp_and_landing(tmp_path):
+    v = _OffsetSim(None).open()
+    ev = EventLog()
+    cfg = C1Config(n_passes=2, pass_length_m=0.4, speed_m_s=0.3, accel_m_s2=1.0, pause_s=0.3,
+                   takeoff_s=1.0, settle_s=0.5, land_s=0.8, height_m=0.8)
+    m = Mission(v, cfg, ev)
+    res = m.run()
+    v.close()
+    assert not res["aborted"], res
+    assert m.ground_z == pytest.approx(0.2, abs=0.01)
+    assert min(v.cmd_z) == pytest.approx(0.25, abs=0.01)           # ground + 0.05, never 0.05
+    assert v.cmd_z[-1] == pytest.approx(0.25, abs=0.05)
+
+
+def test_interrupt_during_landing_still_lands(tmp_path):
+    class Tripping(Mission):
+        tripped = 0
+
+        def fly_pass(self, i):
+            raise KeyboardInterrupt
+
+        def _hold(self, x_target, z, duration, z_from=None, critical_only=False):
+            if critical_only and self.tripped < 2:        # Ctrl+C twice while landing
+                self.tripped += 1
+                raise KeyboardInterrupt
+            return super()._hold(x_target, z, duration, z_from, critical_only)
+
+    v = SimVehicle(None).open()
+    ev = EventLog()
+    cfg = C1Config(n_passes=2, pass_length_m=0.4, takeoff_s=1.0, settle_s=0.5, land_s=0.8)
+    m = Tripping(v, cfg, ev)
+    res = m.run()
+    time.sleep(0.6)
+    z_end = v.s["z"]
+    v.close()
+    assert res["aborted"] and res["reason"] == "operator Ctrl+C"
+    assert m.tripped == 2 and not m.airborne
+    assert [e["ev"] for e in ev.events].count("landed") == 1
+    assert z_end < 0.1

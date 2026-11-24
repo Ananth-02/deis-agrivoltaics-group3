@@ -126,14 +126,14 @@ def test_plan_rejects_zone_behind_takeoff_and_sim_frame_shift():
 
 
 def test_plan_sizes_the_footprint_from_the_field_of_view():
-    p = plan(_points(), _args(fov_deg=60.0))
+    p = plan(_points(), _args(fov_deg=60.0, home_tol=0.0))
     assert p["footprint"] == round((0.85 - 0.30) * math.tan(math.radians(30)), 2) == 0.32   # leaf top 0.30
     assert "tan(60 deg / 2)" in p["footprint_note"]
     assert p["length"] == pytest.approx(1.4 + 1.15 + 0.32 + END_MARGIN_M)
     assert p["approach_m"] == pytest.approx(0.2 * 2.2 + 0.32 + 0.05)
     pts = _points()
     del pts["points"]["leaf"]                                       # falls back to the pot (0.15)
-    assert plan(pts, _args(fov_deg=60.0))["footprint"] == round(0.70 * math.tan(math.radians(30)), 2)
+    assert plan(pts, _args(fov_deg=60.0, home_tol=0.0))["footprint"] == round(0.70 * math.tan(math.radians(30)), 2)
 
 
 def test_gateway_releases_the_panel_during_the_pause_at_the_end_of_the_pass():
@@ -162,3 +162,29 @@ def test_gateway_releases_the_panel_during_the_pause_at_the_end_of_the_pass():
     events = [(ts, m) for ts, m in sent if isinstance(m, PanelEvent)]
     assert [m.event_type for _, m in events] == [EVENT_APPROACH, EVENT_CLEARED]
     assert events[0][0] < t_stop and t_stop < events[1][0] < t_stop + pause
+
+
+def test_plan_fence_room_is_reduced_by_the_home_tolerance():
+    pts = _points()
+    pts["derived"]["fence"] = {"x": [-1.60, 1.4], "y": [-1.0, 1.0]}      # room 3.0 m, need 3.0 m
+    assert plan(pts, _args(home_tol=0.0))["length"] == pytest.approx(3.0)
+    with pytest.raises(PlanError, match="cannot get past"):
+        plan(pts, _args(home_tol=0.10))                                   # room shrinks to 2.9 m
+
+
+def test_plan_refuses_a_takeoff_spot_inside_the_grown_zone():
+    with pytest.raises(PlanError, match="inside the zone"):
+        plan(_points(takeoff=(-1.0, -0.6, 0.01)), _args(direction=1))
+    with pytest.raises(PlanError, match="inside the zone"):
+        plan(_points(takeoff=(-0.7, -0.6, 0.01)), _args(direction=-1))     # 0.15 m from the zone, patch 0.25 m
+    plan(_points(takeoff=(-0.5, -0.6, 0.01)), _args(direction=-1))        # 0.35 m away: fine
+
+
+def test_plan_validates_the_field_of_view_and_the_floor():
+    for fov in (0.0, -5.0, 180.0, 200.0):
+        with pytest.raises(PlanError, match="fov"):
+            plan(_points(), _args(fov_deg=fov))
+    pts = _points()
+    pts["derived"]["floor_z"] = 0.15
+    with pytest.raises(PlanError, match="floor"):
+        plan(pts, _args())

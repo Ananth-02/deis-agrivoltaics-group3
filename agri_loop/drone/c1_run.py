@@ -52,6 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Lighthouse x y the drone must be standing at; refuse to take off if it is further "
                          "than --home-tol away (needs Lighthouse positioning)")
     ap.add_argument("--home-tol", type=float, default=0.10, help="allowed distance from --expect-home, m")
+    ap.add_argument("--geofence-margin", type=float, default=0.5,
+                    help="geofence margin around the pass line, m (land if outside)")
     ap.add_argument("--min-vbat", type=float, default=3.8, help="refuse take-off below this voltage")
     ap.add_argument("--fps-min", type=float, default=20.0, help="C1 frame-rate threshold")
     ap.add_argument("--sim-fps", type=float, default=15.0, help="frame rate of the simulated AI deck")
@@ -79,7 +81,8 @@ def main(argv=None) -> int:
                 pass
     a.aideck_ip = a.aideck_ip or default_host(a.aideck_proto)
     cfg = C1Config(n_passes=a.passes, direction=a.direction, pass_length_m=a.length, speed_m_s=a.speed, height_m=a.height,
-                   pause_s=a.pause, accel_m_s2=a.accel, min_start_vbat=a.min_vbat)
+                   pause_s=a.pause, accel_m_s2=a.accel, min_start_vbat=a.min_vbat,
+                   geofence_margin_m=a.geofence_margin)
     run_dir = new_run_dir(a.out, a.label or ("sim" if a.sim else "fly"))
     save_json(os.path.join(run_dir, "config.json"), dict(args=vars(a), mission=cfg.to_dict()))
     events = EventLog()

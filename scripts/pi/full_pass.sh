@@ -17,8 +17,6 @@ PY="$VENV/bin/python"
 SESSION=fullpass
 
 cd "$REPO"
-args=""
-for a in "$@"; do args="$args $(printf '%q' "$a")"; done
 
 if [ -n "${TMUX:-}" ]; then
     exec "$PY" -m agri_loop.drone.full_pass "$@"
@@ -33,6 +31,9 @@ envargs=()
 for v in AGRI_ARDUINO_IP AGRI_AIDECK_IP AGRI_AIDECK_PROTO ROS_DOMAIN_ID; do
     if [ -n "${!v:-}" ]; then envargs+=(-e "$v=${!v}"); fi
 done
-hold='; echo "Finished. Press Enter to close this window."; read -r _'
-tmux new-session -d -s "$SESSION" -n fullpass ${envargs[@]+"${envargs[@]}"} "cd '$REPO' && $PY -m agri_loop.drone.full_pass$args$hold"
+# The session command is one bash -c with every value passed as a positional argument, so no quoting is needed:
+# $1 = repo, $2 = python, the rest = the full_pass arguments.
+inner='cd "$1" && py="$2" && shift 2 && "$py" -m agri_loop.drone.full_pass "$@"; echo "Finished. Press Enter to close this window."; read -r _'
+tmux new-session -d -s "$SESSION" -n fullpass ${envargs[@]+"${envargs[@]}"} \
+    bash -c "$inner" fullpass-inner "$REPO" "$PY" "$@"
 tmux attach -t "$SESSION"
