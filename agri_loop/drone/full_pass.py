@@ -40,7 +40,7 @@ MAX_TAKEOFF_Y_OFFSET_M = 0.10
 CLEARANCE_M = 0.30      # flight height above the highest part of the rig
 MAX_FLY_Z_M = 1.2       # never fly higher than this (net, base station view)
 MAX_FLOOR_Z_M = 0.10     # the floor must read about 0 in the Lighthouse frame
-GEOFENCE_MARGIN_M = 0.2  # tight mission geofence around the pass line
+GEOFENCE_MARGIN_M = 0.10  # tight mission geofence around the pass line
 SETTLE_S = 3.0          # after landing: let the gateway release the panel
 
 
@@ -389,10 +389,14 @@ def _main(argv=None) -> int:
 def run_foreground(cmd: Sequence[str]) -> int:
     """Run c1_run on this console. Ctrl+C reaches it too (it lands the drone); we just keep waiting.
     SIGTERM or SIGHUP sent to this script is forwarded to c1_run as SIGINT, so it lands."""
-    proc = subprocess.Popen(list(cmd))
+    proc = None
+    early = []     # a signal that arrives before c1_run exists is passed on right after the start
     old = {}
 
     def forward(signum, frame):  # noqa: ARG001
+        if proc is None:
+            early.append(signum)
+            return
         try:
             proc.send_signal(signal.SIGINT)    # first: nothing before this can fail or block
             print("\nStop requested: telling c1_run to land the drone ...")
@@ -406,6 +410,9 @@ def run_foreground(cmd: Sequence[str]) -> int:
                 except (ValueError, OSError):
                     pass
     try:
+        proc = subprocess.Popen(list(cmd))
+        if early:
+            forward(early[0], None)
         while True:
             try:
                 return proc.wait()

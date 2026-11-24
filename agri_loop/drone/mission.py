@@ -60,6 +60,10 @@ class C1Config:
     def __post_init__(self) -> None:
         if self.direction not in (1, -1):
             raise ValueError(f"direction must be 1 or -1, not {self.direction!r}")
+        if not self.geofence_margin_m > 0:
+            raise ValueError("the geofence margin must be above 0")
+        if not self.height_m < self.max_z_m:
+            raise ValueError(f"height {self.height_m} m must be below the {self.max_z_m} m z limit")
         if not self.pass_length_m > 0:
             raise ValueError(f"pass length must be above 0 m, not {self.pass_length_m!r}")
         if not self.speed_m_s > 0 or not self.accel_m_s2 > 0:
@@ -117,6 +121,8 @@ class Mission:
         self.passes_done = 0
         self.airborne = False
         self.in_pass = False   # read by the C4 beacon sender (mission type)
+        self._stop_requested = False
+        self._stopping = False   # the abort handler is running: further signals are ignored
 
     # ---- helpers ----
     def _state(self) -> Dict[str, Any]:
@@ -207,6 +213,9 @@ class Mission:
             raise MissionAbort(f"battery {vb:.2f} V below {c.min_start_vbat} V, not taking off")
         self.home = (s.get("x", 0.0), s.get("y", 0.0))
         self.ground_z = float(s.get("z", 0.0) or 0.0)
+        if abs(self.ground_z) > 0.10:
+            raise MissionAbort(f"the drone reads z = {self.ground_z:.2f} m on the ground, not about 0: wait for "
+                               "the Lighthouse estimate to settle (or restart the drone), then retry")
         self.v.arm(True)
         self.ev.add("armed", self.clock())
         self.sleep(1.0)
@@ -276,22 +285,23 @@ class Mission:
         z0 = s.get("z", c.height_m) or c.height_m
         self.ev.add("land", self.clock())
         self._hold(s.get("x", self.home[0]), self.ground_z + 0.05, c.land_s, z_from=z0, critical_only=True)
+        self.airborne = False     # first: a retry after this point must not take off again
         self.v.stop_motors()
-        self.airborne = False     # at once: a retry after this point must not take off again
         self.v.arm(False)
         self.ev.add("landed", self.clock())
 
     def run(self) -> Dict[str, Any]:
         self.ev.add("mission_start", self.clock(), config=self.cfg.to_dict())
         result = {"passes_done": 0, "aborted": False, "reason": ""}
+        saved = self._install_stop_handler()
         try:
-            self.takeoff()
-            for i in range(self.cfg.n_passes):
-                self.fly_pass(i)
-            self.land()
-        except (MissionAbort, KeyboardInterrupt, Exception) as e:  # noqa: BLE001 - land first, whatever happened
-            saved = _ignore_stop_signals()   # from here until landed, Ctrl+C, SIGTERM and SIGHUP are ignored
             try:
+                self.takeoff()
+                for i in range(self.cfg.n_passes):
+                    self.fly_pass(i)
+                self.land()
+            except (MissionAbort, KeyboardInterrupt, Exception) as e:  # noqa: BLE001 - land first, whatever happened
+                self._stopping = True     # from here on, further stop signals are ignored
                 cut = False
                 if isinstance(e, MissionAbort):
                     reason, cut = e.reason, e.cut_motors
@@ -302,8 +312,8 @@ class Mission:
                 result.update(aborted=True, reason=reason)
                 self.ev.add("abort", self.clock(), reason=reason, cut_motors=cut)
                 self._safe_stop(cut)
-            finally:
-                _restore_signals(saved)
+        finally:
+            _restore_signals(saved)
         result["passes_done"] = self.passes_done
         self.ev.add("mission_end", self.clock(), **result)
         return result
@@ -330,19 +340,27 @@ class Mission:
         except Exception:  # noqa: BLE001 - last resort
             self.v.emergency_stop()
             self.airborne = False
+        self.v.stop_motors()   # land() clears airborne before this; make sure the motors are off whatever happened
 
-
-def _ignore_stop_signals() -> Dict[int, Any]:
-    saved: Dict[int, Any] = {}
-    for name in ("SIGINT", "SIGTERM", "SIGHUP"):
-        sig = getattr(signal, name, None)
-        if sig is None:
-            continue
-        try:
-            saved[sig] = signal.signal(sig, signal.SIG_IGN)
-        except (ValueError, OSError):   # not the main thread
-            pass
-    return saved
+    def _install_stop_handler(self) -> Dict[int, Any]:
+        """One-shot stop handler: the first SIGINT, SIGTERM or SIGHUP raises KeyboardInterrupt (the mission lands),
+        every later one is ignored, so a second signal cannot interrupt the landing."""
+        def handler(signum, frame):  # noqa: ARG001
+            if self._stop_requested or self._stopping:
+                self._stop_requested = True
+                return
+            self._stop_requested = True
+            raise KeyboardInterrupt
+        saved: Dict[int, Any] = {}
+        for name in ("SIGINT", "SIGTERM", "SIGHUP"):
+            sig = getattr(signal, name, None)
+            if sig is None:
+                continue
+            try:
+                saved[sig] = signal.signal(sig, handler)
+            except (ValueError, OSError):   # not the main thread
+                pass
+        return saved
 
 
 def _restore_signals(saved: Dict[int, Any]) -> None:

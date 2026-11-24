@@ -332,8 +332,8 @@ def test_mission_lands_after_an_unexpected_error(tmp_path):
 
 
 class _OffsetSim(SimVehicle):
-    """A floor that reads z = 0.2 m: reports z + 0.2 and takes commands in the same frame."""
-    OFFSET = 0.2
+    """A floor that reads z = 0.08 m: reports z + 0.08 and takes commands in the same frame."""
+    OFFSET = 0.08
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
@@ -359,9 +359,9 @@ def test_mission_uses_the_ground_reading_for_takeoff_ramp_and_landing(tmp_path):
     res = m.run()
     v.close()
     assert not res["aborted"], res
-    assert m.ground_z == pytest.approx(0.2, abs=0.01)
-    assert min(v.cmd_z) == pytest.approx(0.25, abs=0.01)           # ground + 0.05, never 0.05
-    assert v.cmd_z[-1] == pytest.approx(0.25, abs=0.05)
+    assert m.ground_z == pytest.approx(0.08, abs=0.01)
+    assert min(v.cmd_z) == pytest.approx(0.13, abs=0.01)           # ground + 0.05, never 0.05
+    assert v.cmd_z[-1] == pytest.approx(0.13, abs=0.05)
 
 
 def test_interrupt_during_landing_still_lands(tmp_path):
@@ -389,3 +389,46 @@ def test_interrupt_during_landing_still_lands(tmp_path):
     assert m.tripped == 2 and not m.airborne
     assert [e["ev"] for e in ev.events].count("landed") == 1
     assert z_end < 0.1
+
+
+def test_signal_handlers_are_restored_and_a_double_signal_lands_once():
+    import signal
+
+    class Twice(Mission):
+        def fly_pass(self, i):
+            signal.raise_signal(signal.SIGINT)         # first signal: stop requested
+
+        def _hold(self, x_target, z, duration, z_from=None, critical_only=False):
+            if critical_only and not getattr(self, "sent", False):
+                self.sent = True
+                signal.raise_signal(signal.SIGINT)     # further signals while landing are ignored
+                signal.raise_signal(signal.SIGTERM)
+            return super()._hold(x_target, z, duration, z_from, critical_only)
+
+    before = {n: signal.getsignal(getattr(signal, n)) for n in ("SIGINT", "SIGTERM") if hasattr(signal, n)}
+    v = SimVehicle(None).open()
+    ev = EventLog()
+    m = Twice(v, C1Config(n_passes=2, pass_length_m=0.4, takeoff_s=1.0, settle_s=0.5, land_s=0.8), ev)
+    res = m.run()
+    v.close()
+    assert res["aborted"] and res["reason"] == "operator Ctrl+C" and not m.airborne
+    assert [e["ev"] for e in ev.events].count("landed") == 1
+    assert {n: signal.getsignal(getattr(signal, n)) for n in before} == before
+
+
+def test_takeoff_refused_when_the_ground_reads_too_high():
+    v = _OffsetSim(None)
+    v.OFFSET = 0.3
+    v.open()
+    ev = EventLog()
+    res = Mission(v, C1Config(takeoff_s=1.0, settle_s=0.5), ev).run()
+    v.close()
+    assert res["aborted"] and "settle" in res["reason"]
+    assert not any(e["ev"] in ("armed", "takeoff") for e in ev.events)
+
+
+def test_config_rejects_height_above_the_z_limit_and_zero_geofence():
+    with pytest.raises(ValueError):
+        C1Config(height_m=1.3)
+    with pytest.raises(ValueError):
+        C1Config(geofence_margin_m=0.0)
