@@ -96,3 +96,16 @@ def test_watchdog_goes_to_fault_and_recovers():
         p.tick(t)
         t += 0.01
     assert p.fsm == FSM_IDLE_TRACK
+
+
+def test_gateway_config_panel_angle_follows_the_anton_protocol():
+    from types import SimpleNamespace
+
+    from agri_loop.link.messages import MISSION_CROP_OCCLUSION as OCC, MISSION_PANEL_VIEW as VIEW
+    from agri_loop.link.udp_nodes import gateway_config
+
+    d = gateway_config(SimpleNamespace())
+    assert d.angle_for_mission[OCC] == 90.0 and d.angle_for_mission[VIEW] == 0.0      # old defaults
+    a = gateway_config(SimpleNamespace(angle_plant=0.0))
+    assert a.angle_for_mission[OCC] == 0.0 and a.angle_for_mission[VIEW] == 90.0
+    assert gateway_config(SimpleNamespace(angle_plant=0.0, angle_panel=80.0)).angle_for_mission[VIEW] == 80.0

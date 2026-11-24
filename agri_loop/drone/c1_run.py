@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
 import time
 
@@ -39,12 +40,18 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--flip", default="none", choices=["none", "h", "v", "hv"], help="flip frames (mirror mount)")
     ap.add_argument("--passes", type=int, default=10)
     ap.add_argument("--length", type=float, default=1.5, help="pass length, m")
+    ap.add_argument("--direction", type=int, choices=[1, -1], default=1,
+                    help="1 = passes go along +x from the take-off spot, -1 = along -x")
     ap.add_argument("--speed", type=float, default=0.20, help="pass speed, m/s")
     ap.add_argument("--height", type=float, default=0.60, help="flight height, m")
     ap.add_argument("--pause", type=float, default=2.0, help="hover between passes, s")
     ap.add_argument("--accel", type=float, default=0.2, help="acceleration and braking, m/s^2")
     ap.add_argument("--control", default="auto", choices=["auto", "position", "velocity"],
                     help="pass control: auto = position with Lighthouse, velocity otherwise")
+    ap.add_argument("--expect-home", type=float, nargs=2, default=None, metavar=("X", "Y"),
+                    help="Lighthouse x y the drone must be standing at; refuse to take off if it is further "
+                         "than --home-tol away (needs Lighthouse positioning)")
+    ap.add_argument("--home-tol", type=float, default=0.10, help="allowed distance from --expect-home, m")
     ap.add_argument("--min-vbat", type=float, default=3.8, help="refuse take-off below this voltage")
     ap.add_argument("--fps-min", type=float, default=20.0, help="C1 frame-rate threshold")
     ap.add_argument("--sim-fps", type=float, default=15.0, help="frame rate of the simulated AI deck")
@@ -58,9 +65,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
-    a = build_parser().parse_args(argv)
+    ap = build_parser()
+    a = ap.parse_args(argv)
+    if not a.length > 0:
+        ap.error("--length must be above 0")
+    if not a.speed > 0:
+        ap.error("--speed must be above 0")
+    for name in ("SIGTERM", "SIGHUP"):   # a stop request lands the drone, like Ctrl+C
+        if hasattr(signal, name):
+            try:
+                signal.signal(getattr(signal, name), signal.default_int_handler)
+            except (ValueError, OSError):
+                pass
     a.aideck_ip = a.aideck_ip or default_host(a.aideck_proto)
-    cfg =C1Config(n_passes=a.passes, pass_length_m=a.length, speed_m_s=a.speed, height_m=a.height,
+    cfg = C1Config(n_passes=a.passes, direction=a.direction, pass_length_m=a.length, speed_m_s=a.speed, height_m=a.height,
                    pause_s=a.pause, accel_m_s2=a.accel, min_start_vbat=a.min_vbat)
     run_dir = new_run_dir(a.out, a.label or ("sim" if a.sim else "fly"))
     save_json(os.path.join(run_dir, "config.json"), dict(args=vars(a), mission=cfg.to_dict()))
@@ -85,6 +103,7 @@ def main(argv=None) -> int:
 
     recorder = None
     beacon = None
+    aborted = False
     try:
         ok, report, problems = preflight(vehicle, cfg, need_camera=not a.no_camera)
         events.add("preflight", time.time(), **report)
@@ -92,6 +111,21 @@ def main(argv=None) -> int:
         if not ok:
             print("Not flying: " + "; ".join(problems))
             return 2
+        lighthouse = report.get("positioning") == "lighthouse"
+        if (a.control == "position" or a.expect_home) and not lighthouse:
+            print("Not flying: --control position and --expect-home need Lighthouse positioning, but the "
+                  f"drone reports '{report.get('positioning')}'")
+            return 2
+        if a.expect_home:
+            s0 = vehicle.latest()
+            dist = ((s0.get("x", 1e9) - a.expect_home[0]) ** 2 + (s0.get("y", 1e9) - a.expect_home[1]) ** 2) ** 0.5
+            events.add("home_check", time.time(), x=s0.get("x"), y=s0.get("y"), dist=dist, tol=a.home_tol)
+            if dist > a.home_tol:
+                print(f"Not flying: the drone is {dist:.2f} m from the planned take-off spot "
+                      f"({a.expect_home[0]:.2f}, {a.expect_home[1]:.2f}), limit {a.home_tol:.2f} m. "
+                      "Put it on the spot (mark it with tape) and retry")
+                return 2
+            print(f"Take-off spot check: {dist:.2f} m from the planned point, ok")
         cfg.pass_control = a.control if a.control != "auto" else (
             "position" if report.get("positioning") == "lighthouse" else "velocity")
         print(f"Pass control: {cfg.pass_control}")
@@ -116,6 +150,7 @@ def main(argv=None) -> int:
             beacon = BeaconSender(vehicle.latest, lambda: mission.in_pass, (a.beacon, P_GW),
                                   offset=tuple(a.beacon_offset)).start()
         result = mission.run()
+        aborted = bool(result.get("aborted"))
         print_report("Mission", result)
     finally:
         if recorder is not None:
@@ -140,7 +175,7 @@ def main(argv=None) -> int:
     contact_sheet([run], run_dir)
     print("\n" + open(os.path.join(run_dir, "c1_summary.md"), encoding="utf-8").read())
     print(f"Run saved to {run_dir}")
-    return 0
+    return 4 if aborted else 0
 
 
 if __name__ == "__main__":

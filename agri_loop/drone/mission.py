@@ -1,7 +1,7 @@
 """C1 mission: take off, fly N straight passes at constant speed, land.
 
 Passes run along the x axis of the Flow deck frame (x forward at power-up,
-origin where the drone took off). With `alternate` the passes go out and back
+origin where the drone took off), or along -x with direction = -1. With `alternate` the passes go out and back
 on the same line, so the room only needs to be pass_length_m long.
 
 Each pass follows a trapezoid speed profile: ramp up at accel_m_s2, hold
@@ -22,6 +22,7 @@ Safety (checked on every 20 Hz tick, any one lands or cuts the motors):
 from __future__ import annotations
 
 import math
+import signal
 import time
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Dict, Optional
@@ -43,6 +44,7 @@ class C1Config:
     land_s: float = 2.5
     rate_hz: float = 20.0
     alternate: bool = True
+    direction: int = 1             # 1 = passes go along +x from home, -1 = along -x
     lateral_gain: float = 1.0      # (m/s) per m of lateral error
     hold_gain: float = 1.0         # (m/s) per m of along-track error during pauses
     yaw_gain: float = 1.0          # (deg/s) per deg of heading error
@@ -53,6 +55,14 @@ class C1Config:
     max_tilt_deg: float = 45.0
     pass_timeout_factor: float = 2.0
     pass_control: str = "velocity"   # "velocity" or "position" (see module docstring)
+
+    def __post_init__(self) -> None:
+        if self.direction not in (1, -1):
+            raise ValueError(f"direction must be 1 or -1, not {self.direction!r}")
+        if not self.pass_length_m > 0:
+            raise ValueError(f"pass length must be above 0 m, not {self.pass_length_m!r}")
+        if not self.speed_m_s > 0 or not self.accel_m_s2 > 0:
+            raise ValueError("speed and acceleration must be above 0")
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -137,7 +147,7 @@ class Mission:
                 self._low_since = None
         hx, hy = self.home
         m = c.geofence_margin_m
-        x, y, z = s["x"] - hx, s["y"] - hy, s["z"]
+        x, y, z = self._dir() * (s["x"] - hx), s["y"] - hy, s["z"]   # x: distance along the pass direction
         if x < -m or x > c.pass_length_m + m or abs(y) > m or z > c.height_m + m:
             raise MissionAbort(f"geofence: x={x:.2f} y={y:.2f} z={z:.2f}")
 
@@ -150,6 +160,9 @@ class Mission:
         # positive yawrate in a hover setpoint turns clockwise (cflib MotionCommander convention)
         yawrate = _clip(self.cfg.yaw_gain * yaw_deg, 30.0)
         self.v.hover(vx_b, vy_b, yawrate, z)
+
+    def _dir(self) -> float:
+        return -1.0 if self.cfg.direction < 0 else 1.0
 
     def _position_mode(self) -> bool:
         return self.cfg.pass_control == "position"
@@ -202,11 +215,13 @@ class Mission:
 
     def fly_pass(self, i: int) -> None:
         c = self.cfg
-        direction = -1.0 if (c.alternate and i % 2 == 1) else 1.0
-        x0 = self.home[0] if direction > 0 else self.home[0] + c.pass_length_m
+        d0 = self._dir()
+        far = self.home[0] + d0 * c.pass_length_m
+        direction = -d0 if (c.alternate and i % 2 == 1) else d0
+        x0 = self.home[0] if direction == d0 else far
         x1 = x0 + direction * c.pass_length_m
         if not c.alternate:
-            x0, x1, direction = self.home[0], self.home[0] + c.pass_length_m, 1.0
+            x0, x1, direction = self.home[0], far, d0
             self._hold(x0, c.height_m, max(c.pause_s, c.pass_length_m / max(c.max_correction_m_s, 1e-3)))
         timeout = c.pass_timeout_factor * c.pass_length_m / c.speed_m_s + 3.0
         t0 = self.clock()
@@ -279,6 +294,11 @@ class Mission:
             result.update(aborted=True, reason="operator Ctrl+C")
             self.ev.add("abort", self.clock(), reason="operator Ctrl+C", cut_motors=False)
             self._safe_stop(False)
+        except Exception as e:  # noqa: BLE001 - never close the link while airborne: land first
+            reason = f"unexpected error: {type(e).__name__}: {e}"
+            result.update(aborted=True, reason=reason)
+            self.ev.add("abort", self.clock(), reason=reason, cut_motors=False)
+            self._safe_stop(False)
         result["passes_done"] = self.passes_done
         self.ev.add("mission_end", self.clock(), **result)
         return result
@@ -288,8 +308,18 @@ class Mission:
             self.v.emergency_stop() if cut_motors else self.v.stop_motors()
             self.airborne = False
             return
+        old = None
+        try:   # a further Ctrl+C or SIGTERM while landing must not abandon the landing
+            old = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        except (ValueError, OSError):   # not the main thread
+            pass
         try:
-            self.land()
+            for _ in range(3):
+                try:
+                    self.land()
+                    break
+                except KeyboardInterrupt:
+                    continue
         except MissionAbort as e:
             self.ev.add("abort", self.clock(), reason=e.reason, cut_motors=True)
             self.v.emergency_stop()
@@ -297,3 +327,6 @@ class Mission:
         except Exception:  # noqa: BLE001 - last resort
             self.v.emergency_stop()
             self.airborne = False
+        finally:
+            if old is not None:
+                signal.signal(signal.SIGINT, old)

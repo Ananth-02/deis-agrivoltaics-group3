@@ -289,3 +289,43 @@ def test_recorder_reconnects_after_drop(tmp_path):
     with open(tmp_path / "frames" / "index.csv", newline="") as f:
         idx = [int(r["idx"]) for r in csv.DictReader(f)]
     assert idx == list(range(len(idx)))       # numbering continues across the reconnect
+
+
+@pytest.mark.parametrize("control", ["velocity", "position"])
+def test_sim_mission_direction_minus_x(tmp_path, control):
+    logger = FlightLogger(str(tmp_path / "flight_log.csv"))
+    v = SimVehicle(logger).open()
+    ev = EventLog()
+    cfg = C1Config(n_passes=2, pass_length_m=0.6, speed_m_s=0.2, accel_m_s2=0.4, pause_s=0.3,
+                   takeoff_s=1.0, settle_s=0.5, land_s=0.8, pass_control=control, direction=-1)
+    res = Mission(v, cfg, ev).run()
+    logger.close()
+    v.close()
+    assert res["passes_done"] == 2 and not res["aborted"], res
+    starts = [e for e in ev.events if e["ev"] == "pass_start"]
+    assert [e["direction"] for e in starts] == [-1, 1]
+    assert starts[0]["x1"] == pytest.approx(starts[0]["x0"] - 0.6)
+    assert starts[1]["x0"] == pytest.approx(starts[0]["x1"]) and starts[1]["x1"] == pytest.approx(starts[0]["x0"])
+    assert [e["reason"] for e in ev.events if e["ev"] == "pass_end"] == ["reached", "reached"]
+
+
+def test_config_rejects_bad_direction_and_length():
+    for kw in (dict(direction=0), dict(direction=2), dict(pass_length_m=0.0), dict(pass_length_m=-1.0)):
+        with pytest.raises(ValueError):
+            C1Config(**kw)
+
+
+def test_mission_lands_after_an_unexpected_error(tmp_path):
+    class Broken(Mission):
+        def fly_pass(self, i):
+            raise RuntimeError("boom")
+
+    logger = FlightLogger(str(tmp_path / "flight_log.csv"))
+    v = SimVehicle(logger).open()
+    ev = EventLog()
+    cfg = C1Config(n_passes=2, pass_length_m=0.4, takeoff_s=1.0, settle_s=0.5, land_s=0.8)
+    res = Broken(v, cfg, ev).run()
+    logger.close()
+    v.close()
+    assert res["aborted"] and "boom" in res["reason"]
+    assert any(e["ev"] == "landed" for e in ev.events)
