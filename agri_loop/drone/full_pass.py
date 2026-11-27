@@ -35,6 +35,7 @@ TRIGGER_MARGIN_M = _GW.trigger_margin
 # The pass ends this far past the zone, beyond the footprint: the drone stops a few cm short of the end,
 # and the gateway only releases the panel once the footprint is release_margin clear of the zone.
 END_MARGIN_M = _GW.release_margin + 0.10
+DEMO_PAST_PLANT_M = 0.10  # demo: the camera centre must get this far past the far edge of the plant
 ZONE_FALLBACK_M = 0.15  # zone half-size around the pot when the panel points are missing
 MAX_TAKEOFF_Y_OFFSET_M = 0.10
 CLEARANCE_M = 0.30      # flight height above the highest part of the rig
@@ -77,7 +78,8 @@ def plan(points: Optional[Dict[str, Any]], args: Any) -> Dict[str, Any]:
     if fov is not None and not 0 < float(fov) < 180:
         raise PlanError(f"--fov-deg {fov} must be between 0 and 180")
     fp_note = f"assumed {fp:.2f} m (give --fov-deg to size it from the geometry)"
-    passes = int(_arg(args, "passes", 2))
+    demo = bool(_arg(args, "demo", False))
+    passes = 2 if demo else int(_arg(args, "passes", 2))
     home_tol = float(_arg(args, "home_tol", 0.10))
     if not speed > 0:
         raise PlanError("the speed must be above 0")
@@ -157,6 +159,12 @@ def plan(points: Optional[Dict[str, Any]], args: Any) -> Dict[str, Any]:
             raise PlanError("the take-off spot is inside the zone grown by the camera patch: the climb would go "
                             "through the rig")
         need = dist_far + end_margin
+        plant_far = None
+        if demo:
+            # one pass: only the camera centre has to get past the plant, the panel closes as the drone flies back
+            pl = [q for q in (pot, _pos(points, "leaf")) if q]
+            plant_far = max(direction * q[0] for q in pl) * direction if pl else far
+            need = direction * (plant_far - takeoff[0]) + DEMO_PAST_PLANT_M
         fence = (derived.get("fence") or {}).get("x")
         room = None
         if fence:
@@ -170,14 +178,16 @@ def plan(points: Optional[Dict[str, Any]], args: Any) -> Dict[str, Any]:
         if room is not None and length > room + 1e-9:
             raise PlanError(f"the pass of {length:.2f} m ends beyond the fence (room {room:.2f} m)")
         if length < need - 1e-9:
-            raise PlanError(f"the pass cannot get past the zone: it needs {need:.2f} m (zone far edge + footprint + "
-                            f"{END_MARGIN_M:.2f} m) but is {length:.2f} m"
+            what = (f"the far edge of the plant + {DEMO_PAST_PLANT_M:.2f} m" if demo
+                    else f"zone far edge + footprint + {END_MARGIN_M:.2f} m")
+            raise PlanError(f"the pass cannot get past the {'plant' if demo else 'zone'}: it needs {need:.2f} m "
+                            f"({what}) but is {length:.2f} m"
                             + (f", the fence allows {room:.2f} m" if room is not None else ""))
         if dist_near < approach:
             warnings.append(f"the approach distance {approach:.2f} m (speed x lead + footprint) does not fit before "
                             f"the zone ({dist_near:.2f} m from the take-off spot): the tilt starts as the pass starts")
         runway = length - dist_far - fp     # return passes: start-to-footprint-contact distance
-        if passes > 1 and runway < speed * lead_s:
+        if passes > 1 and not demo and runway < speed * lead_s:
             warnings.append(f"return passes start only {runway:.2f} m before the camera footprint reaches the zone, "
                             f"the panel needs about {speed * lead_s:.2f} m of travel (speed x lead): it may still "
                             "be moving when the camera reaches the zone")
@@ -193,7 +203,7 @@ def plan(points: Optional[Dict[str, Any]], args: Any) -> Dict[str, Any]:
         warnings.append("no take-off point known: the pass length is NOT checked against the zone or the fence")
     return dict(zone=zone, height=round(height, 3), floor_z=round(floor, 3), fly_z=fly_z, direction=direction,
                 length=round(length, 3), speed=speed, lead_s=lead_s, footprint=fp, passes=passes,
-                approach_m=round(approach, 3), footprint_note=fp_note, takeoff=takeoff, pot=pot, warnings=warnings)
+                approach_m=round(approach, 3), demo=demo, footprint_note=fp_note, takeoff=takeoff, pot=pot, warnings=warnings)
 
 
 def print_plan(p: Dict[str, Any]) -> None:
@@ -206,6 +216,9 @@ def print_plan(p: Dict[str, Any]) -> None:
           f"{p['passes']} passes at {p['speed']} m/s")
     print(f"  camera patch under the drone: half-size {p['footprint']:.2f} m, {p['footprint_note']}")
     print(f"  the tilt starts {p['approach_m']:.2f} m before the zone (speed x {p['lead_s']} s + footprint)")
+    if p.get("demo"):
+        print("  demo: panel opens on the way out only; it closes when the drone has passed "
+              "(at the far end or on the way back)")
     for w in p["warnings"]:
         print(f"  WARNING: {w}")
 
@@ -266,6 +279,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--sim", action="store_true", help="simulated drone (implies the fake Arduino)")
     ap.add_argument("--fake-arduino", action="store_true", help="fake Arduino on localhost, real drone")
     ap.add_argument("--passes", type=int, default=2, help="even number, so the drone lands at the take-off spot")
+    ap.add_argument("--demo", action="store_true",
+                    help="one pass out and back (2 passes): the panel opens on the way out only, the drone only "
+                         "has to get 0.10 m past the plant, the return leg does not tilt the panel")
     ap.add_argument("--speed", type=float, default=0.2, help="pass speed, m/s")
     ap.add_argument("--lead-s", type=float, default=2.2, help="how far ahead the patch under the drone is predicted (comms + panel actuation), s")
     ap.add_argument("--footprint", type=float, default=FOOTPRINT_M,
@@ -293,6 +309,8 @@ def build_commands(a: Any, p: Dict[str, Any], run: str, fake: bool) -> Dict[str,
           "--height", str(p["fly_z"]), "--length", str(p["length"]), "--speed", str(p["speed"]),
           "--passes", str(p["passes"]), "--geofence-margin", str(GEOFENCE_MARGIN_M), "--direction", str(p["direction"]), "--fps-min", "5",
           "--out", os.path.join(run, "c1")]
+    if p.get("demo"):
+        c1 += ["--beacon-passes", "outbound"]
     if not a.sim:   # the real flight needs Lighthouse positions, and must start on the planned spot
         c1 += ["--control", "position"]
         if p.get("takeoff"):
@@ -381,6 +399,10 @@ def _main(argv=None) -> int:
             if proc is not None:
                 _stop(proc, name)
     report(run)
+    try:
+        write_plant_frames(run, p)
+    except Exception as e:  # noqa: BLE001  the report is a bonus, it must not change the exit code
+        print(f"plant_frames.txt not written: {e}")
     if rc:
         print(f"\nThe flight did not complete cleanly (exit code {rc}).")
     return rc
@@ -421,6 +443,50 @@ def run_foreground(cmd: Sequence[str]) -> int:
     finally:
         for name, h in old.items():
             signal.signal(getattr(signal, name), h)
+
+
+def plant_frames(c1_dir: str, p: Dict[str, Any]) -> List[str]:
+    """Frame files recorded during outbound pass 0 while the drone was within the zone x-range grown by the
+    footprint. Frame times come from frames/index.csv, the drone x at those times from flight_log.csv."""
+    import csv
+
+    import numpy as np
+
+    from ..link.eventlog import EventLog
+    from .flightlog import load_flight_log
+
+    events = EventLog.load(os.path.join(c1_dir, "events.jsonl"))
+    start = next((e for e in events if e["ev"] == "pass_start" and e.get("i") == 0), None)
+    end = next((e for e in events if e["ev"] == "pass_end" and e.get("i") == 0), None)
+    if start is None or end is None:
+        raise ValueError("no complete pass 0 in the events")
+    log = load_flight_log(os.path.join(c1_dir, "flight_log.csv"))
+    t, x = np.asarray(log["t"], float), np.asarray(log["x"], float)
+    ok = ~(np.isnan(t) | np.isnan(x))
+    t, x = t[ok], x[ok]
+    with open(os.path.join(c1_dir, "frames", "index.csv"), newline="") as f:
+        rows = list(csv.DictReader(f))
+    z, fp = p["zone"], p["footprint"]
+    out = []
+    for r in rows:
+        tf = float(r["t"])
+        if not start["t"] <= tf <= end["t"]:
+            continue
+        xf = float(np.interp(tf, t, x))
+        if z[0] - fp <= xf <= z[1] + fp:
+            out.append(r["file"])
+    return out
+
+
+def write_plant_frames(run: str, p: Dict[str, Any]) -> None:
+    c1_dirs = sorted(d for d in glob.glob(os.path.join(run, "c1", "*")) if os.path.isdir(d))
+    if not c1_dirs:
+        return
+    files = plant_frames(c1_dirs[-1], p)
+    path = os.path.join(run, "plant_frames.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("".join(os.path.join(c1_dirs[-1], "frames", n) + "\n" for n in files))
+    print(f"  {len(files)} frames over the plant on the way out: {path}")
 
 
 def report(run: str) -> None:

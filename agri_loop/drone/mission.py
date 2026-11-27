@@ -121,6 +121,8 @@ class Mission:
         self.passes_done = 0
         self.airborne = False
         self.in_pass = False   # read by the C4 beacon sender (mission type)
+        self.pass_index: Optional[int] = None   # index of the running (or last) pass
+        self.pass_direction = 0                 # +1 / -1 along x of the running (or last) pass
         self._stop_requested = False
         self._stopping = False   # the abort handler is running: further signals are ignored
 
@@ -241,6 +243,7 @@ class Mission:
                     control=c.pass_control)
         t_next = t0
         reason = "reached"
+        self.pass_index, self.pass_direction = i, int(direction)
         self.in_pass = True
         if self._position_mode():
             reason = self._pass_position(x0, x1, direction, t0, timeout)
@@ -262,6 +265,16 @@ class Mission:
         self.ev.add("pass_end", self.clock(), i=i, reason=reason)
         self.passes_done += 1
         self._hold(x1, c.height_m, c.pause_s)
+
+    def beacon_active(self, which: str = "all") -> bool:
+        """Should the C4 beacon report the mission now? which = "all": during every pass; "outbound": only
+        during the outward passes (even index in the alternating pattern: 0, 2, ...), so the return legs do not
+        make the panel tilt."""
+        if not self.in_pass:
+            return False
+        if which == "outbound":
+            return self.pass_index is not None and self.pass_index % 2 == 0
+        return True
 
     def _pass_position(self, x0: float, x1: float, direction: float, t0: float, timeout: float) -> str:
         """Slide the position target from x0 to x1 on the speed profile; done once the drone is at x1."""
@@ -302,6 +315,7 @@ class Mission:
                 self.land()
             except (MissionAbort, KeyboardInterrupt, Exception) as e:  # noqa: BLE001 - land first, whatever happened
                 self._stopping = True     # from here on, further stop signals are ignored
+                self.in_pass = False      # the beacon stops reporting the mission, so the panel can close
                 cut = False
                 if isinstance(e, MissionAbort):
                     reason, cut = e.reason, e.cut_motors

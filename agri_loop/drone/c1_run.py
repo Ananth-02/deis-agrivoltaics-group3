@@ -59,6 +59,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--sim-fps", type=float, default=15.0, help="frame rate of the simulated AI deck")
     ap.add_argument("--beacon", default="", metavar="HOST",
                     help="also send DroneBeacon messages to the C4 gateway on HOST (UDP 5001)")
+    ap.add_argument("--beacon-passes", choices=["all", "outbound"], default="all",
+                    help="all = the beacon reports the mission during every pass; outbound = only during the "
+                         "outward passes (0, 2, ...), the return legs send MISSION_NONE so the panel stays shut")
     ap.add_argument("--beacon-offset", type=float, nargs=2, default=(0.0, 0.0), metavar=("X", "Y"),
                     help="take-off point in the bed frame, m")
     ap.add_argument("--label", default="")
@@ -150,7 +153,7 @@ def main(argv=None) -> int:
         if a.beacon:
             from .beacon import P_GW, BeaconSender
 
-            beacon = BeaconSender(vehicle.latest, lambda: mission.in_pass, (a.beacon, P_GW),
+            beacon = BeaconSender(vehicle.latest, lambda: mission.beacon_active(a.beacon_passes), (a.beacon, P_GW),
                                   offset=tuple(a.beacon_offset)).start()
         result = mission.run()
         aborted = bool(result.get("aborted"))
